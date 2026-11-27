@@ -253,6 +253,15 @@ impl ClickhouseLoader {
         )
     }
 
+    /// Whether `system.databases` shows the loader's database to its user.
+    pub(crate) fn database_held(&self) -> Result<bool> {
+        let held = self.number(&format!(
+            "SELECT count() FROM system.databases WHERE name = {}",
+            literal(&self.database)
+        ))?;
+        Ok(held > 0)
+    }
+
     /// Run one SQL statement that must not run twice unless it never reached the server.
     fn query_once(&self, sql: &str) -> Result<String> {
         self.post(

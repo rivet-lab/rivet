@@ -2279,6 +2279,8 @@ pub(crate) mod stand {
         pub(crate) authorization: String,
         /// The JSON body, `null` when there was none.
         pub(crate) body: serde_json::Value,
+        /// The body as text, which a ClickHouse statement is.
+        pub(crate) text: String,
     }
 
     pub(crate) struct Stand {
@@ -2388,6 +2390,7 @@ pub(crate) mod stand {
             path: target.split('?').next().unwrap_or("").to_string(),
             authorization,
             body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+            text: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 }

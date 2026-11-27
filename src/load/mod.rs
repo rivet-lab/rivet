@@ -4,6 +4,7 @@ use crate::destination::gcs::GcsStore;
 use crate::types::target::{TargetColumnSpec, TargetStatus};
 use anyhow::{Context, Result};
 use staging::{Cleanup, maybe_cleanup};
+use std::sync::Arc;
 
 mod bigquery;
 pub(crate) mod bq_rest;
@@ -458,24 +459,36 @@ pub(crate) fn warehouse_http_error(status: u16, message: String) -> anyhow::Erro
     crate::error::coded(code, message)
 }
 
-/// `rivet check`'s read of the warehouse a `load:` block names: a BigQuery dataset the project does not hold is refused as the load's first job refuses it.
+/// How long `rivet check` waits for a warehouse to say whether the place a load writes to exists.
+const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The place a `load:` block names, found missing, and the code and sentence `rivet load` would stop with.
+struct Missing {
+    code: crate::error::Code,
+    text: String,
+}
+
+/// What one warehouse answers: the place is missing, held (`None`), or the question could not be answered.
+type Ask = dyn Fn(&plan::LoadTarget, &crate::config::DestinationCredential) -> Result<Option<Missing>>
+    + Send
+    + Sync;
+
+/// `rivet check`'s read of the warehouse a `load:` block names: a BigQuery dataset, ClickHouse database, or Snowflake database or schema the warehouse does not show is refused as the load's first statement refuses it.
 pub fn probe_load_target(
     config: &crate::config::Config,
     exports: &[crate::config::ExportConfig],
 ) -> Result<()> {
-    probe_with(config, exports, bq_rest::BigQueryApi::for_dataset)
+    probe_with(config, exports, PROBE_BUDGET, Arc::new(ask_warehouse))
 }
 
-/// [`probe_load_target`] over the client `open` builds for a project, dataset and credential.
+/// [`probe_load_target`] over `ask`, each question given `budget` to answer.
 fn probe_with(
     config: &crate::config::Config,
     exports: &[crate::config::ExportConfig],
-    open: impl Fn(&str, &str, &crate::config::DestinationCredential) -> Result<bq_rest::BigQueryApi>,
+    budget: std::time::Duration,
+    ask: Arc<Ask>,
 ) -> Result<()> {
     let Some(section) = &config.load else {
-        return Ok(());
-    };
-    let plan::LoadTarget::Bigquery { project, dataset } = &section.target else {
         return Ok(());
     };
     if seeded!("check-leaves-warehouse-target-unprobed", true, false) {
@@ -489,44 +502,165 @@ fn probe_with(
         {
             continue;
         }
-        let credential = crate::config::DestinationCredential::choose(
-            &export.destination,
-            &format!("export '{}'", export.name),
-        )?;
+        let credential = match &section.target {
+            plan::LoadTarget::Bigquery { .. } => crate::config::DestinationCredential::choose(
+                &export.destination,
+                &format!("export '{}'", export.name),
+            )?,
+            _ => crate::config::DestinationCredential::Ambient,
+        };
         if asked.contains(&credential) {
             continue;
         }
-        confirm_bigquery_dataset(open(project, dataset, &credential), project, dataset)?;
+        match ask_within(budget, &ask, &section.target, &credential) {
+            Ok(Some(Missing { code, text })) => return Err(crate::error::coded(code, text)),
+            Ok(None) => {}
+            Err(e) => log::warn!(
+                "check: could not confirm {} exists ({e:#}); `rivet load` asks the warehouse with \
+                 the same credential",
+                section.target.place()
+            ),
+        }
         asked.push(credential);
     }
     Ok(())
 }
 
-/// The refusal of a `dataset` the project does not hold; an answer that cannot say (credential, 401, 403, transport) is a warning.
-fn confirm_bigquery_dataset(
-    api: Result<bq_rest::BigQueryApi>,
-    project: &str,
-    dataset: &str,
-) -> Result<()> {
-    match api.and_then(|api| api.dataset_metadata(dataset)) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(crate::error::coded(
-            crate::error::codes::LOAD_WAREHOUSE_REJECTED,
-            format!(
-                "BigQuery dataset `{project}:{dataset}` does not exist, so `rivet load` would \
-                 fail its first job with `Not found: Dataset`; rivet does not create datasets. \
-                 Create it in the location of the staging bucket (`bq mk -d {project}:{dataset}`), \
-                 then re-run `rivet check`"
-            ),
-        )),
-        Err(e) => {
-            log::warn!(
-                "check: could not confirm BigQuery dataset `{project}:{dataset}` exists ({e:#}); \
-                 `rivet load` asks the warehouse with the same credential"
+/// One question to the warehouse on its own thread, so a blackholed endpoint costs `budget` and not the retries of its client.
+fn ask_within(
+    budget: std::time::Duration,
+    ask: &Arc<Ask>,
+    target: &plan::LoadTarget,
+    credential: &crate::config::DestinationCredential,
+) -> Result<Option<Missing>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (ask, target, credential) = (Arc::clone(ask), target.clone(), credential.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(ask(&target, &credential));
+    });
+    rx.recv_timeout(budget)
+        .map_err(|_| anyhow::anyhow!("no answer within {} s", budget.as_secs()))?
+}
+
+/// The question `rivet check` puts to the warehouse `target` names, with the login the load uses.
+fn ask_warehouse(
+    target: &plan::LoadTarget,
+    credential: &crate::config::DestinationCredential,
+) -> Result<Option<Missing>> {
+    match target {
+        plan::LoadTarget::Bigquery { project, dataset } => {
+            let api = bq_rest::BigQueryApi::for_dataset(project, dataset, credential)?;
+            Ok(missing_bigquery_dataset(
+                api.dataset_metadata(dataset)?,
+                project,
+                dataset,
+            ))
+        }
+        plan::LoadTarget::Clickhouse {
+            url,
+            database,
+            user,
+            password_env,
+            named_collection: _,
+            ca_file,
+            allow_plaintext,
+        } => {
+            let loader = clickhouse::ClickhouseLoader::new(
+                url.expose(),
+                database,
+                user,
+                password_env,
+                Default::default(),
+            )
+            .ca_file(ca_file.clone())
+            .allow_plaintext(*allow_plaintext);
+            Ok(missing_clickhouse_database(
+                loader.database_held()?,
+                database,
+                user,
+            ))
+        }
+        plan::LoadTarget::Snowflake {
+            account,
+            user,
+            private_key_path,
+            role,
+            database,
+            schema,
+            ..
+        } => {
+            let login = snowflake_login(
+                &|var| std::env::var(var).ok(),
+                account,
+                user,
+                private_key_path,
+                role.as_deref(),
             );
-            Ok(())
+            Ok(missing_snowflake_place(
+                login.place(database, schema)?,
+                database,
+                schema,
+            ))
         }
     }
+}
+
+/// The refusal of a `dataset` the project does not hold.
+fn missing_bigquery_dataset(
+    found: Option<serde_json::Value>,
+    project: &str,
+    dataset: &str,
+) -> Option<Missing> {
+    found.is_none().then(|| Missing {
+        code: crate::error::codes::LOAD_WAREHOUSE_REJECTED,
+        text: format!(
+            "BigQuery dataset `{project}:{dataset}` does not exist, so `rivet load` would \
+             fail its first job with `Not found: Dataset`; rivet does not create datasets. \
+             Create it in the location of the staging bucket (`bq mk -d {project}:{dataset}`), \
+             then re-run `rivet check`"
+        ),
+    })
+}
+
+/// The refusal of a ClickHouse `database` the user cannot see.
+fn missing_clickhouse_database(held: bool, database: &str, user: &str) -> Option<Missing> {
+    (!held).then(|| Missing {
+        code: crate::error::codes::LOAD_WAREHOUSE_OBJECT_NOT_FOUND,
+        text: format!(
+            "ClickHouse database `{database}` is not visible to user `{user}`: it does not \
+             exist or the user holds no grant on it, so `rivet load` would fail its first \
+             statement with `UNKNOWN_DATABASE`; rivet does not create databases. Create it \
+             (`CREATE DATABASE {database}`) and grant the user access, then re-run `rivet check`"
+        ),
+    })
+}
+
+/// The refusal of a Snowflake database or schema the login cannot see.
+fn missing_snowflake_place(
+    found: snowflake::Place,
+    database: &str,
+    schema: &str,
+) -> Option<Missing> {
+    let (what, create) = match found {
+        snowflake::Place::Held => return None,
+        snowflake::Place::NoDatabase => (
+            format!("database `{database}`"),
+            format!("CREATE DATABASE {database}"),
+        ),
+        snowflake::Place::NoSchema => (
+            format!("schema `{database}.{schema}`"),
+            format!("CREATE SCHEMA {database}.{schema}"),
+        ),
+    };
+    Some(Missing {
+        code: crate::error::codes::LOAD_WAREHOUSE_OBJECT_NOT_FOUND,
+        text: format!(
+            "Snowflake {what} is not visible to this login: it does not exist or the role \
+             holds no privilege on it, so `rivet load` would fail its first statement; rivet \
+             does not create databases or schemas. Create it (`{create}`) and grant the role \
+             usage, then re-run `rivet check`"
+        ),
+    })
 }
 
 /// Whether an existing warehouse table is one rivet loaded, per the load ledger.
@@ -3372,12 +3506,41 @@ pub(crate) mod tests {
     }
 
     const BQ_LOAD: &str = "load:\n  target: bigquery\n  project: p\n  dataset: d\n";
+    const SF_LOAD: &str = "load:\n  target: snowflake\n  account: a\n  user: u\n  \
+                           private_key_path: /k.p8\n  warehouse: w\n  database: d\n  schema: s\n  \
+                           storage_integration: si\n";
+    const TEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn probed(cfg: &crate::config::Config, status: u16) -> (Result<()>, usize) {
         use bq_rest::stand::{Stand, json};
-        let stand = Stand::start(move |_, _| json(status, "{\"location\":\"US\"}"));
-        let out = probe_with(cfg, &cfg.exports, |_, _, _| Ok(stand.api()));
+        let stand = Arc::new(Stand::start(move |_, _| {
+            json(status, "{\"location\":\"US\"}")
+        }));
+        let api = Arc::clone(&stand);
+        let ask: Arc<Ask> = Arc::new(move |_, _| {
+            Ok(missing_bigquery_dataset(
+                api.api().dataset_metadata("d")?,
+                "p",
+                "d",
+            ))
+        });
+        let out = probe_with(cfg, &cfg.exports, TEST_BUDGET, ask);
         (out, stand.asked("/datasets/d"))
+    }
+
+    /// `probe_with` over an `ask` that counts its questions and answers `answer` to each.
+    fn counted(
+        cfg: &crate::config::Config,
+        answer: impl Fn() -> Result<Option<Missing>> + Send + Sync + 'static,
+    ) -> (Result<()>, usize) {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&count);
+        let ask: Arc<Ask> = Arc::new(move |_, _| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            answer()
+        });
+        let out = probe_with(cfg, &cfg.exports, TEST_BUDGET, ask);
+        (out, count.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     /// A dataset the project does not hold is refused with the load's code and the pinned text.
@@ -3419,27 +3582,129 @@ pub(crate) mod tests {
         );
     }
 
-    /// A config with no `load:` block, another warehouse or a destination BigQuery cannot read asks nothing.
+    /// A config with no `load:` block or a destination the warehouse cannot read asks nothing.
     #[test]
-    fn a_config_without_a_bigquery_load_asks_the_warehouse_nothing() {
-        let snowflake = "load:\n  target: snowflake\n  account: a\n  user: u\n  \
-                         private_key_path: /k.p8\n  warehouse: w\n  database: d\n  schema: s\n  \
-                         storage_integration: si\n";
-        let clickhouse = "load:\n  target: clickhouse\n  url: \"http://127.0.0.1:1\"\n  database: d\n  \
-                          user: u\n  password_env: P\n";
-        for load in ["", snowflake, clickhouse] {
-            let (out, asked) = probed(&probe_config(load, None), 404);
-            assert!(out.is_ok(), "{load}: {out:?}");
-            assert_eq!(asked, 0, "{load}");
-        }
+    fn a_config_without_a_readable_load_asks_the_warehouse_nothing() {
+        let (out, asked) = counted(&probe_config("", None), || Ok(None));
+        assert!(out.is_ok() && asked == 0, "{out:?} {asked}");
         let s3 = crate::config::Config::from_yaml(&format!(
             "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  \
              - name: a\n    table: a\n    mode: full\n    format: parquet\n    destination:\n      \
              type: s3\n      bucket: b\n      prefix: a/\n{BQ_LOAD}"
         ))
         .unwrap();
-        let (out, asked) = probed(&s3, 404);
+        let (out, asked) = counted(&s3, || Ok(None));
         assert!(out.is_ok() && asked == 0, "{out:?} {asked}");
+    }
+
+    /// A Snowflake or ClickHouse warehouse is asked once however many exports load into it.
+    #[test]
+    fn a_snowflake_or_clickhouse_warehouse_is_asked_once() {
+        let clickhouse = "load:\n  target: clickhouse\n  url: \"http://127.0.0.1:1\"\n  database: d\n  \
+                          user: u\n  password_env: P\n";
+        for load in [SF_LOAD, clickhouse] {
+            let (out, asked) = counted(&probe_config(load, None), || Ok(None));
+            assert!(out.is_ok() && asked == 1, "{load}: {out:?} {asked}");
+        }
+    }
+
+    /// A Snowflake place the login cannot see is refused by the code and sentence `rivet load` stops with.
+    #[test]
+    fn a_snowflake_place_the_login_cannot_see_is_refused_by_check() {
+        let cfg = probe_config(SF_LOAD, None);
+        for (found, text) in [
+            (
+                snowflake::Place::NoDatabase,
+                "Snowflake database `d` is not visible to this login: it does not exist or the role \
+                 holds no privilege on it, so `rivet load` would fail its first statement; rivet \
+                 does not create databases or schemas. Create it (`CREATE DATABASE d`) and grant \
+                 the role usage, then re-run `rivet check`",
+            ),
+            (
+                snowflake::Place::NoSchema,
+                "Snowflake schema `d.s` is not visible to this login: it does not exist or the role \
+                 holds no privilege on it, so `rivet load` would fail its first statement; rivet \
+                 does not create databases or schemas. Create it (`CREATE SCHEMA d.s`) and grant \
+                 the role usage, then re-run `rivet check`",
+            ),
+        ] {
+            let (out, asked) = counted(&cfg, move || Ok(missing_snowflake_place(found, "d", "s")));
+            let e = out.unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&e),
+                Some("RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND")
+            );
+            assert_eq!(e.to_string(), text);
+            assert_eq!(asked, 1);
+        }
+        assert!(missing_snowflake_place(snowflake::Place::Held, "d", "s").is_none());
+    }
+
+    /// A warehouse that does not answer within the budget is a warning, and the check goes on.
+    #[test]
+    fn a_warehouse_that_never_answers_costs_the_budget_and_is_not_a_refusal() {
+        let cfg = probe_config(SF_LOAD, None);
+        let ask: Arc<Ask> = Arc::new(|_, _| {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok(None)
+        });
+        let started = std::time::Instant::now();
+        let out = probe_with(
+            &cfg,
+            &cfg.exports,
+            std::time::Duration::from_millis(200),
+            ask,
+        );
+        assert!(out.is_ok(), "{out:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    /// A ClickHouse database the user cannot see is refused with the code the load's `UNKNOWN_DATABASE` answer gets.
+    #[test]
+    fn a_missing_clickhouse_database_is_refused_by_check_with_the_loads_code() {
+        let (out, seen) = clickhouse_probed("0\n", 200);
+        let e = out.unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND")
+        );
+        assert_eq!(
+            e.to_string(),
+            "ClickHouse database `d` is not visible to user `u`: it does not exist or the user \
+             holds no grant on it, so `rivet load` would fail its first statement with \
+             `UNKNOWN_DATABASE`; rivet does not create databases. Create it (`CREATE DATABASE d`) \
+             and grant the user access, then re-run `rivet check`"
+        );
+        assert_eq!(
+            seen,
+            vec!["SELECT count() FROM system.databases WHERE name = 'd'"]
+        );
+    }
+
+    /// A ClickHouse database the user sees passes, and an answer that cannot say is a warning.
+    #[test]
+    fn a_held_clickhouse_database_passes_and_an_answer_that_cannot_say_is_not_a_refusal() {
+        for (body, status) in [("1\n", 200), ("Code: 516", 403), ("Code: 516", 401)] {
+            let (out, seen) = clickhouse_probed(body, status);
+            assert!(out.is_ok(), "{status}: {out:?}");
+            assert_eq!(seen.len(), 1, "{status}");
+        }
+    }
+
+    /// `rivet check`'s probe of a ClickHouse at a loopback stand that answers `body` with `status`, and the statements it was sent.
+    fn clickhouse_probed(body: &'static str, status: u16) -> (Result<()>, Vec<String>) {
+        use bq_rest::stand::{Stand, json};
+        unsafe { std::env::set_var("RIVET_CH_PROBE_TEST_PASSWORD", "x") };
+        let stand = Stand::start(move |_, _| json(status, body));
+        let load = format!(
+            "load:\n  target: clickhouse\n  url: \"{}\"\n  database: d\n  user: u\n  \
+             password_env: RIVET_CH_PROBE_TEST_PASSWORD\n",
+            stand.endpoint()
+        );
+        let cfg = probe_config(&load, None);
+        let out = probe_load_target(&cfg, &cfg.exports);
+        let sent = stand.seen().into_iter().map(|r| r.text).collect();
+        (out, sent)
     }
 
     /// A bucket-root staging prefix, an unreadable probe answer and a warehouse HTTP status name their codes.

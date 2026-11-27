@@ -1,4 +1,4 @@
-//! `rivet check` asks the BigQuery warehouse a `load:` block names whether its dataset exists.
+//! `rivet check` asks the warehouse a `load:` block names (BigQuery, ClickHouse, Snowflake) whether the place it loads into exists.
 //!
 //!     docker compose up -d postgres fake-gcs
 //!     cargo test --test live_suite check_warehouse_target -- --ignored
@@ -123,4 +123,162 @@ fn check_without_a_load_block_never_asks_the_warehouse() {
     let out = wh.check(None);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(wh.asked(), Vec::<String>::new());
+}
+
+const CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
+
+fn clickhouse_load(database: &str) -> String {
+    format!(
+        "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {database}, \
+         user: {CLICKHOUSE_USER}, password_env: {CH_PASSWORD_ENV}, pk: [id] }}"
+    )
+}
+
+/// One ClickHouse statement on the stand; a panic naming the SQL when it fails.
+fn ch(sql: &str) {
+    let resp = reqwest::blocking::Client::new()
+        .post(CLICKHOUSE_HTTP_URL)
+        .basic_auth(CLICKHOUSE_USER, Some(CLICKHOUSE_PASSWORD))
+        .body(sql.to_string())
+        .send()
+        .expect("post to clickhouse");
+    let status = resp.status();
+    assert!(status.is_success(), "clickhouse {status}: {sql}");
+}
+
+/// A scratch ClickHouse database that is dropped when the cell ends.
+struct ChDb(String);
+
+impl ChDb {
+    fn created(prefix: &str) -> Self {
+        let name = unique_name(prefix);
+        ch(&format!("CREATE DATABASE {name}"));
+        ChDb(name)
+    }
+}
+
+impl Drop for ChDb {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| ch(&format!("DROP DATABASE IF EXISTS {}", self.0)));
+    }
+}
+
+/// A PostgreSQL export to fake-gcs loading as `load` says.
+fn staged_rig(load: &str) -> Rig {
+    require_alive(LiveService::Postgres);
+    ensure_gcs_bucket(GCS_BUCKET);
+    let table = seed_pg_numeric_table(5);
+    Rig::pg_batch(table.name())
+        .dest_gcs(GCS_BUCKET, &unique_name("check_wt"), FAKE_GCS_ENDPOINT)
+        .top_line(load)
+}
+
+/// The `RIVET_*` code a refusal printed.
+fn code_of(stderr: &str) -> String {
+    let at = stderr.find("RIVET_").expect("a coded refusal");
+    stderr[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+        .collect()
+}
+
+/// A ClickHouse database the server does not show stops `check` with the code `load` stops with.
+#[test]
+#[ignore = "live: requires postgres + fake-gcs + clickhouse"]
+fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
+    require_alive(LiveService::ClickHouse);
+    let missing = unique_name("rivet_chcheck_missing");
+    let rig = staged_rig(&clickhouse_load(&missing));
+    let envs = [(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)];
+    let check = rig.cli_env(&["check"], &envs);
+    let check_err = stderr_of(&check);
+    assert_eq!(check.status.code(), Some(1), "{check_err}");
+    assert!(
+        check_err.contains(&format!(
+            "ClickHouse database `{missing}` is not visible to user `{CLICKHOUSE_USER}`"
+        )),
+        "{check_err}"
+    );
+    rig.run_ok();
+    let load = rig.load_args_env(&[], &envs);
+    let load_err = stderr_of(&load);
+    assert!(!load.status.success(), "{load_err}");
+    assert_eq!(code_of(&check_err), code_of(&load_err), "{load_err}");
+    assert_eq!(check.status.code(), load.status.code(), "{load_err}");
+}
+
+/// A ClickHouse database the server shows passes `check`.
+#[test]
+#[ignore = "live: requires postgres + fake-gcs + clickhouse"]
+fn check_passes_a_clickhouse_database_the_server_holds() {
+    require_alive(LiveService::ClickHouse);
+    let db = ChDb::created("rivet_chcheck_held");
+    let rig = staged_rig(&clickhouse_load(&db.0));
+    let out = rig.cli_env(&["check"], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+/// A ClickHouse that cannot be reached is a warning, as it was before the probe.
+#[test]
+#[ignore = "live: requires postgres + fake-gcs"]
+fn check_warns_when_clickhouse_cannot_be_reached() {
+    let load = format!(
+        "load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, \
+         user: u, password_env: {CH_PASSWORD_ENV}, pk: [id] }}"
+    );
+    let out = staged_rig(&load).cli_env(&["check"], &[(CH_PASSWORD_ENV, "x")]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("could not confirm ClickHouse database `d` exists"),
+        "{err}"
+    );
+}
+
+/// A Snowflake database or schema the login cannot see stops `check` with the code `load` stops with; the stand's own passes.
+#[test]
+#[ignore = "live: requires postgres + the Snowflake stand"]
+fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
+    let Some(sf) = SfLive::from_env("sf_check_place") else {
+        return;
+    };
+    require_alive(LiveService::Postgres);
+    let table = seed_pg_numeric_table(5);
+    let rig_for = |line: &str| {
+        Rig::pg_batch(table.name())
+            .dest_gcs_live(&sf.bucket, &sf.prefix)
+            .top_line(line)
+    };
+    let (database, schema) = sf.place();
+    let ok = rig_for(&sf.load_line("")).cli(&["check"]);
+    assert!(ok.status.success(), "{}", stderr_of(&ok));
+    let no_database = unique_name("RIVET_NO_DB").to_uppercase();
+    let no_schema = unique_name("RIVET_NO_SCHEMA").to_uppercase();
+    for (db, sc, named) in [
+        (
+            no_database.as_str(),
+            schema,
+            format!("database `{no_database}`"),
+        ),
+        (
+            database,
+            no_schema.as_str(),
+            format!("schema `{database}.{no_schema}`"),
+        ),
+    ] {
+        let rig = rig_for(&sf.load_line_in(db, sc, ""));
+        let check = rig.cli(&["check"]);
+        let check_err = stderr_of(&check);
+        assert_eq!(check.status.code(), Some(1), "{check_err}");
+        assert!(
+            check_err.contains(&format!("Snowflake {named} is not visible to this login")),
+            "{check_err}"
+        );
+        rig.run_ok();
+        let load = rig.cli(&["load"]);
+        let load_err = stderr_of(&load);
+        assert!(!load.status.success(), "{load_err}");
+        assert_eq!(code_of(&check_err), code_of(&load_err), "{load_err}");
+        assert_eq!(check.status.code(), load.status.code(), "{load_err}");
+    }
 }
