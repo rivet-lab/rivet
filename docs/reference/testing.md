@@ -78,7 +78,7 @@ cargo test -- --ignored
 | `live_resume.rs` | Full-mode file accumulation across runs; incremental cursor round-trip; `--resume` gate message | Task 1.2 |
 | `live_retry_and_faults.rs` | Baseline via Toxiproxy; latency toxic tolerated; proxy disable → clean non-zero exit; mid-stream proxy disable/enable → recovery via retries; permanent-error short-circuit | Task 4.1, 4.2 |
 | `live_chaos.rs` | High-latency false-positive guard; chunked export survives mid-stream outage; S3 missing bucket fails cleanly; S3 recovery after transient-outage simulation | Task 4A.4, 6.2 |
-| `live_check_warehouse_target.rs` | `rivet check` over a BigQuery `load:` block against a loopback warehouse: 404 refuses `RIVET_LOAD_WAREHOUSE_REJECTED`, 200 passes, 403 warns and exits 0, no `load:` block asks nothing | – |
+| `live_check_warehouse_target.rs` | `rivet check` over a `load:` block: a BigQuery dataset against a loopback warehouse (404 refuses `RIVET_LOAD_WAREHOUSE_REJECTED`, 200 passes, 403 warns and exits 0, no `load:` block asks nothing); a ClickHouse database and a Snowflake database or schema on the stand (missing refuses with the code `rivet load` stops with, held passes, unreachable warns) | – |
 | `live_schema_drift.rs` | Added column / removed column / stable schema — detection flag in `export_metrics.schema_changed` | Task 7.1, 7.2 |
 | `live_performance_smoke.rs` | 5 000-row + 200B payload finishes within 30 s; split-by-size produces multiple files with no row loss; parallel-4 chunked export materialises every id exactly once | Task 9.1, 9.2 |
 | `live_crash_recovery.rs` | Four fault points (`after_source_read`, `after_file_write`, `after_manifest_update`, `after_cursor_commit`) × expected post-crash state × recovery run | Task 1.1 |

@@ -163,19 +163,24 @@ impl Drop for ChDb {
     }
 }
 
-/// A PostgreSQL export to fake-gcs loading as `load` says.
-fn staged_rig(load: &str) -> Rig {
+/// A PostgreSQL export to fake-gcs loading as `load` says, and the table it reads, dropped with the guard.
+fn staged_rig(load: &str) -> (Rig, PgTable) {
     require_alive(LiveService::Postgres);
     ensure_gcs_bucket(GCS_BUCKET);
     let table = seed_pg_numeric_table(5);
-    Rig::pg_batch(table.name())
+    let rig = Rig::pg_batch(table.name())
         .dest_gcs(GCS_BUCKET, &unique_name("check_wt"), FAKE_GCS_ENDPOINT)
         .top_line(load)
+        .a_failed_run_may_leave(
+            &[Leftover::LoadAttempt],
+            "a load into a place that is not there stops at its first statement",
+        );
+    (rig, table)
 }
 
-/// The `RIVET_*` code a refusal printed.
+/// The code in the `Error: [RIVET_...]` line a refusal printed.
 fn code_of(stderr: &str) -> String {
-    let at = stderr.find("RIVET_").expect("a coded refusal");
+    let at = stderr.find("Error: [").expect("a coded refusal") + "Error: [".len();
     stderr[at..]
         .chars()
         .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
@@ -188,7 +193,7 @@ fn code_of(stderr: &str) -> String {
 fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
     require_alive(LiveService::ClickHouse);
     let missing = unique_name("rivet_chcheck_missing");
-    let rig = staged_rig(&clickhouse_load(&missing));
+    let (rig, _table) = staged_rig(&clickhouse_load(&missing));
     let envs = [(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)];
     let check = rig.cli_env(&["check"], &envs);
     let check_err = stderr_of(&check);
@@ -213,7 +218,7 @@ fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
 fn check_passes_a_clickhouse_database_the_server_holds() {
     require_alive(LiveService::ClickHouse);
     let db = ChDb::created("rivet_chcheck_held");
-    let rig = staged_rig(&clickhouse_load(&db.0));
+    let (rig, _table) = staged_rig(&clickhouse_load(&db.0));
     let out = rig.cli_env(&["check"], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
     assert!(out.status.success(), "{}", stderr_of(&out));
 }
@@ -226,7 +231,8 @@ fn check_warns_when_clickhouse_cannot_be_reached() {
         "load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, \
          user: u, password_env: {CH_PASSWORD_ENV}, pk: [id] }}"
     );
-    let out = staged_rig(&load).cli_env(&["check"], &[(CH_PASSWORD_ENV, "x")]);
+    let (rig, _table) = staged_rig(&load);
+    let out = rig.cli_env(&["check"], &[(CH_PASSWORD_ENV, "x")]);
     let err = stderr_of(&out);
     assert!(out.status.success(), "{err}");
     assert!(
@@ -248,6 +254,10 @@ fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
         Rig::pg_batch(table.name())
             .dest_gcs_live(&sf.bucket, &sf.prefix)
             .top_line(line)
+            .a_failed_run_may_leave(
+                &[Leftover::LoadAttempt],
+                "a load into a place that is not there stops at its first statement",
+            )
     };
     let (database, schema) = sf.place();
     let ok = rig_for(&sf.load_line("")).cli(&["check"]);

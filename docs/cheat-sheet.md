@@ -59,10 +59,11 @@ More auth paths (MinIO, Azurite, SAS details): [cloud-auth.md](cloud-auth.md) ·
 
 - **BigQuery:** the dataset must already exist, because rivet does not create
   datasets, and `rivet check` refuses a missing one. Keep it in the same location as the bucket.
-- **Snowflake:** database, schema and storage integration must already exist.
+- **Snowflake:** database, schema and storage integration must already exist;
+  `rivet check` refuses a database or schema the login cannot see.
   rivet creates the file format, stage, tables and views itself, which is why the
   role needs the `CREATE` grants above.
-- **ClickHouse** (preview): the database must already exist. rivet creates the tables
+- **ClickHouse** (preview): the database must already exist, and `rivet check` refuses one the user cannot see. rivet creates the tables
   and views over HTTP. Known limits: [recipes/clickhouse-load.md](recipes/clickhouse-load.md).
 
 ---

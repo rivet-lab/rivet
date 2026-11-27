@@ -653,7 +653,7 @@ fn missing_snowflake_place(
         ),
     };
     Some(Missing {
-        code: crate::error::codes::LOAD_WAREHOUSE_OBJECT_NOT_FOUND,
+        code: crate::error::codes::LOAD_WAREHOUSE_REJECTED,
         text: format!(
             "Snowflake {what} is not visible to this login: it does not exist or the role \
              holds no privilege on it, so `rivet load` would fail its first statement; rivet \
@@ -3632,7 +3632,7 @@ pub(crate) mod tests {
             let e = out.unwrap_err();
             assert_eq!(
                 crate::error::error_code(&e),
-                Some("RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND")
+                Some("RIVET_LOAD_WAREHOUSE_REJECTED")
             );
             assert_eq!(e.to_string(), text);
             assert_eq!(asked, 1);
