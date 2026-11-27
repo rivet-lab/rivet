@@ -74,8 +74,16 @@ fn url_edits(s: &str) -> Vec<Edit> {
 /// Shortest value registered for masking: a shorter one would blank ordinary text.
 const MIN_MASKED_LEN: usize = 8;
 
-/// Every value registered by [`mask_value_in_output`]: raw, and percent-encoded in upper-case and in lower-case hex.
-static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// The registered forms and the automaton built from them, rebuilt when a registration adds a form.
+struct Registry {
+    values: Vec<String>,
+    nfa: Option<std::sync::Arc<NFA>>,
+}
+
+static MASKED: std::sync::Mutex<Registry> = std::sync::Mutex::new(Registry {
+    values: Vec::new(),
+    nfa: None,
+});
 
 /// `encoded` with the hex digits of every percent escape in lower case.
 fn lower_hex(encoded: &str) -> String {
@@ -118,13 +126,17 @@ fn registered_forms(value: &str) -> Vec<String> {
     forms
 }
 
-/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded in uniform-case hex (a mixed-case escape is not matched); a value under [`MIN_MASKED_LEN`] bytes and the word `password` are not registered.
+/// Register a credential value so [`redact_secrets`] masks its raw and percent-encoded forms.
 pub fn mask_value_in_output(value: &str) {
     let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    let before = known.values.len();
     for form in registered_forms(value) {
-        if !known.contains(&form) {
-            known.push(form);
+        if !known.values.contains(&form) {
+            known.values.push(form);
         }
+    }
+    if known.values.len() != before {
+        known.nfa = automaton(&known.values).map(std::sync::Arc::new);
     }
 }
 
@@ -302,6 +314,7 @@ fn hidden_ranges(text: &str, spans: &[(usize, usize)]) -> Vec<(usize, usize)> {
 }
 
 /// `text` with every registered value masked and every credential a scanner reads in it masked, in the text as it was and in the text with the registered values read as masks.
+#[cfg(test)]
 fn redact_with(text: &str, known: &[String]) -> String {
     redact_by(text, automaton(known).as_ref())
 }
@@ -325,12 +338,10 @@ fn redact_by(text: &str, nfa: Option<&NFA>) -> String {
     mask_formed(&masked, nfa)
 }
 
-/// Compose every redactor.  Use this at every boundary that turns a
-/// driver/library error (or any operator-untrusted string) into a
-/// persisted or emitted artifact.
+/// Compose every redactor; the boundary for driver errors and operator-untrusted text.
 pub fn redact_secrets(s: &str) -> String {
-    let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
-    redact_with(s, &known)
+    let nfa = MASKED.lock().unwrap_or_else(|e| e.into_inner()).nfa.clone();
+    redact_by(s, nfa.as_deref())
 }
 
 /// `raw` with its keyword/value passwords, its whole userinfo (user included) and its query secrets masked, and whether any was found: the form a persisted plan holds.
