@@ -15,6 +15,7 @@ import concurrent.futures as cf
 import dataclasses
 import contextlib
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -1562,7 +1563,8 @@ def _self_test() -> None:
     assert not Spec(load, "postgres", "load", "password-env").staged
     unreached = Outcome(staged, [], False, None, [1], True, False, False, [])
     led = Ledger()
-    counts, _ = grade(led, [unreached])
+    with contextlib.redirect_stdout(io.StringIO()):
+        counts, _ = grade(led, [unreached])
     assert counts["SKIP"] == 1 and counts["PASS"] == 0 and counts["N/A"] == 0, "a staged cell the stub never saw must read as a skip"
     reached = Outcome(staged, [], True, None, [1], True, False, False, [])
     assert grade(Ledger(), [reached])[0]["PASS"] == 1
