@@ -453,10 +453,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     // ratchet-pin: type-known-defects (review 2027-02-01) strings
     "postgres:INET",
     "postgres:CIDR",
-    "postgres:UUID (ClickHouse)",
-    // 2026-11-22: eight array rows left this list, a NULL array is refused at the ClickHouse load (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE); UUID[] keeps its FixedString(16) defect.
-    "postgres:UUID[] (ClickHouse)",
-    "mssql:UNIQUEIDENTIFIER (ClickHouse)",
 ]; // ratchet-pin: end
 
 /// A row that never delivers carries `na:` dated and without `delivery`; an engine with no delivering row needs it on every row.
@@ -787,7 +783,7 @@ fn a_known_defect_without_today_delivery_is_refused() {
     row_mut(&mut doc, "postgres", "INET")
         .remove("today_delivery")
         .unwrap();
-    row_mut(&mut doc, "mssql", "UNIQUEIDENTIFIER")
+    row_mut(&mut doc, "postgres", "CIDR")
         .get_mut("clickhouse")
         .and_then(Value::as_mapping_mut)
         .unwrap()

@@ -567,3 +567,12 @@ shapes:
     mssql: { sound: "mssql_lost_checkpoint_is_refused_not_reanchored (live_cdc_mssql.rs). CAUGHT by make seeded-recall 2026-10-30." }
     mongo: { sound: "mongo_lost_checkpoint_is_refused_not_reanchored (live_cdc_mongo.rs). CAUGHT by make seeded-recall 2026-10-30." }
     oracle: { sound: "oracle_cdc_lost_checkpoint_is_refused_not_reanchored (live_cdc_oracledb.rs). CAUGHT by make seeded-recall 2026-10-30." }
+
+  - id: a_typed_column_lands_as_the_warehouse_type_it_is
+    what: "a CDC column whose Arrow carrier is not the warehouse's own type (a uuid rides as FixedSizeBinary(16)) must land in the ClickHouse `__changes` table as the native type (`Nullable(UUID)`), each inserted, updated and deleted key read back by a second client as the text the source renders; a column landed as the carrier's raw bytes passes every row count and fails only a read of the value and the catalog type"
+    mutant: "dev/seeded/seeds.yaml `clickhouse-uuid-lands-as-bytes` (seeded! sites in src/load/clickhouse.rs: landed_type answers FixedString(16) and PartRead::of builds no conversion), also the unfixed binary of 2026-11-21"
+    postgres: { sound: "a_postgres_cdc_uuid_column_loads_into_clickhouse_as_native_uuid (live_clickhouse_load.rs): the catalog type and the live view against the source's uuid text. RED 2026-11-22 on the unfixed binary: the rig oracle read the table as Nullable(FixedString(16)) where the ledger loads Nullable(UUID)" }
+    mysql:    { na: "MySQL has no uuid column type: a CHAR(36) uuid rides a string column and lands as a ClickHouse String, so no raw-bytes carrier exists to convert and the value read-back is the type-fidelity cell for it" }
+    mssql:    { sound: "a_sql_server_cdc_uniqueidentifier_column_loads_into_clickhouse_as_native_uuid (live_clickhouse_load.rs): inserted, updated and deleted keys. RED 2026-11-22 on the unfixed binary: the rig oracle read the table as Nullable(FixedString(16)) where the ledger loads Nullable(UUID); GREEN on the branch" }
+    mongo:    { na: "a MongoDB change is read into its one `document` column, so no typed uuid column reaches the ClickHouse typed loader and there is no carrier to convert" }
+    oracle:   { na: "Oracle has no uuid column type (SYS_GUID() is RAW(16), a binary column landed as bytes by design, see type_binary), so no uuid column reaches the conversion" }

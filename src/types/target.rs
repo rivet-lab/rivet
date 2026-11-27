@@ -1237,13 +1237,11 @@ mod clickhouse {
                  JSONExtract* functions",
                 None,
             ),
-            // The 16-byte UUID field autoloads as FixedString(16) (verified live).
-            // The bytes are the canonical UUID; recover the native UUID with the
-            // hex -> dashed-text -> toUUID round-trip clickhouse_load pins.
             RivetType::Uuid => Resolved::diverge(
                 ChType::Uuid,
                 ChType::FixedString16,
-                "UUID autoloads as FixedString(16); recover the native UUID with toUUID after load",
+                "UUID autoloads as FixedString(16) through a plain Parquet read; `rivet load` \
+                 converts it to a native UUID, and a direct read recovers it with toUUID",
                 Some(
                     "toUUID(concat(substring(lower(hex({col})),1,8),'-',substring(lower(hex({col})),9,4),'-',substring(lower(hex({col})),13,4),'-',substring(lower(hex({col})),17,4),'-',substring(lower(hex({col})),21,12)))",
                 ),
