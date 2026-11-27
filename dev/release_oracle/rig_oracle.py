@@ -509,13 +509,23 @@ def mysql_query_native(url: str, query: str) -> dict:
     return {n: MYSQL_TEMPORAL[code] + (f"({fsp})" if fsp else "") for n, code, fsp in mysql_describe(url, query) if code in MYSQL_TEMPORAL}
 
 
-def _mssql_query_projection(query: str, native: dict, renders: dict) -> tuple[str, dict] | None:
-    """(the query with each column the ledger renders server-side projected through its render, those columns' declared types), or `None` when no column of the result needs one: the scanner reads a datetime2(7) at microseconds."""
-    drawn = {c: n for c, n in native.items() if n in renders}
+#: SQL Server renders of a column declared `text`, which deliver the server's own text where the ledger's render of the native type would not.
+MSSQL_TEXT_RENDER = {"DATETIME": "CONVERT(varchar(23), {c}, 121)"}
+
+
+def _mssql_column_renders(native: dict, renders: dict, overrides: dict) -> dict:
+    """`{column: server-side render}` of the columns the ledger renders, a column declared `text` over a native type of MSSQL_TEXT_RENDER read as the server's own text."""
+    text = {c.upper() for c, t in overrides.items() if override_duck(t or "") == "VARCHAR"}
+    return {c: r for c, n in native.items() if (r := MSSQL_TEXT_RENDER.get(n) if c.upper() in text and n in MSSQL_TEXT_RENDER else renders.get(n))}
+
+
+def _mssql_query_projection(query: str, native: dict, col_renders: dict) -> tuple[str, dict] | None:
+    """(the query with each column of `col_renders` projected through its render, those columns' declared types), or `None` when no column of the result needs one: the scanner reads a datetime2(7) at microseconds."""
+    drawn = {c: n for c, n in native.items() if c in col_renders}
     if not drawn:
         return None
     name = lambda c: "[" + c.replace("]", "]]") + "]"  # noqa: E731
-    cols = ", ".join(renders[drawn[c]].replace("{c}", name(c)) + f" AS {name(c)}" if c in drawn else name(c) for c in native)
+    cols = ", ".join(col_renders[c].replace("{c}", name(c)) + f" AS {name(c)}" if c in drawn else name(c) for c in native)
     return f"SELECT {cols} FROM ({query.rstrip().rstrip(';')}) AS rivet_q", drawn
 
 
@@ -654,7 +664,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mssql":
         sch = schema or "dbo"
         if query:
-            if projected := _mssql_query_projection(query, _mssql_query_native(ora, query), renders):
+            q_native = _mssql_query_native(ora, query)
+            if projected := _mssql_query_projection(query, q_native, _mssql_column_renders(q_native, renders, spec.get("overrides") or {})):
                 return f"mssql_scan('ms', {_lit(projected[0])})", [], projected[1]
             return f"mssql_scan('ms', {_lit(query)})", [], native
         oid = f"OBJECT_ID({_lit(sch + '.' + leaf)})"
@@ -700,9 +711,10 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         native = {c: n for c, n in native.items() if c in readable} if partial else native
         # The scanner trims CHAR/NCHAR padding; the server's own cast keeps it.
         renders = {**{n: "CAST({c} AS NVARCHAR(MAX))" for n in native.values() if n.startswith(("CHAR(", "NCHAR("))}, **renders}
-        if not partial and not any(n in renders for n in native.values()):
+        col_renders = _mssql_column_renders(native, renders, spec.get("overrides") or {})
+        if not partial and not col_renders:
             return f"ms.{sch}.{leaf}", key, native
-        cols = ", ".join(renders.get(n, "{c}").replace("{c}", f"[{c}]") + f" AS [{c}]" for c, n in native.items())
+        cols = ", ".join(col_renders.get(c, "{c}").replace("{c}", f"[{c}]") + f" AS [{c}]" for c in native)
         return f"mssql_scan('ms', {_lit(f'SELECT {cols} FROM [{sch}].[{leaf}]')})", key, native
     if engine == "mongo":
         from .value_diff import mongo_mixed_id_source
@@ -2522,12 +2534,16 @@ def _absent_table_self_test() -> None:
 
 
 def _mssql_query_projection_self_test() -> None:
-    """A SQL Server query whose result holds a ledger-rendered type is read through the server's render; one that does not is read as it is."""
-    renders = {"DATETIME2": "CONVERT(varchar(max), {c}, 121)"}
-    sql, drawn = _mssql_query_projection("SELECT id, t2 FROM t;", {"id": "INT", "t2": "DATETIME2", "o]k": "INT"}, renders)
+    """A SQL Server query whose result holds a ledger-rendered type is read through the server's render; one that does not is read as it is; a DATETIME declared `text` is read as the server's own text."""
+    renders = {"DATETIME2": "CONVERT(varchar(max), {c}, 121)", "DATETIME": "CONVERT(varchar(max), CAST({c} AS DATETIME2(7)), 121)"}
+    native = {"id": "INT", "t2": "DATETIME2", "o]k": "INT"}
+    sql, drawn = _mssql_query_projection("SELECT id, t2 FROM t;", native, _mssql_column_renders(native, renders, {}))
     assert sql == "SELECT [id], CONVERT(varchar(max), [t2], 121) AS [t2], [o]]k] FROM (SELECT id, t2 FROM t) AS rivet_q", sql
     assert drawn == {"t2": "DATETIME2"}, drawn
-    assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
+    assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, _mssql_column_renders({"id": "INT"}, renders, {})) is None, "no rendered column leaves the query as written"
+    dt = {"v": "DATETIME", "w": "DATETIME"}
+    got = _mssql_column_renders(dt, renders, {"V": "text", "w": "timestamp"})
+    assert got == {"v": MSSQL_TEXT_RENDER["DATETIME"], "w": renders["DATETIME"]}, f"only the column declared text is read as the server's text: {got}"
 
 
 def _mysql_server_render_self_test() -> None:

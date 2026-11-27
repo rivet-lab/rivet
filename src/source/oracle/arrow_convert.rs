@@ -381,7 +381,11 @@ pub(super) fn timestamp_micros(t: &OracleTimestamp) -> Result<i64> {
 
 /// Nanoseconds since the Unix epoch, or the coded refusal naming `name` outside Arrow's 1677..2262 range.
 fn timestamp_nanos(t: &OracleTimestamp, name: &str) -> Result<i64> {
-    crate::types::timestamp_nanos_or_refuse(timestamp_datetime(t)?, "oracle", name)
+    crate::types::timestamp_nanos_or_refuse(
+        timestamp_datetime(t)?,
+        crate::types::NanosSource::Oracle,
+        name,
+    )
 }
 
 /// Appends a RAW value that fills exactly `width` bytes, or refuses it by value code naming `name`.
