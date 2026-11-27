@@ -44,6 +44,19 @@ pub(crate) fn renders_as_text(ct: ColumnType) -> bool {
     matches!(ct, ColumnType::SSVariant | ColumnType::Udt)
 }
 
+/// Whether a batch cell of wire type `ct` read into a `Utf8` field is the server's text of the value: `sql_variant`, a CLR UDT, or a date-time type declared `text`.
+fn utf8_is_rendered(ct: ColumnType) -> bool {
+    renders_as_text(ct)
+        || matches!(
+            ct,
+            ColumnType::Datetime
+                | ColumnType::Datetime4
+                | ColumnType::Datetimen
+                | ColumnType::Datetime2
+                | ColumnType::DatetimeOffsetn
+        )
+}
+
 /// A cell rendered as text (ISO temporals, exact decimals, lowercase hex bytes); `None` for SQL NULL.
 pub(crate) fn cell_text(c: &ColumnData<'_>) -> Option<String> {
     const DAYS_TO_1900: i64 = 693_595;
@@ -150,8 +163,8 @@ fn cell_type_name(c: &ColumnData<'_>) -> String {
 use crate::error::Result;
 use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field, resolve_column,
+    ColumnOverrides, NanosSource, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
+    build_arrow_field, resolve_column, timestamp_nanos_or_refuse,
 };
 
 /// Days from the Arrow/Unix epoch (1970-01-01) used to anchor `Date32`.
@@ -650,7 +663,7 @@ fn build_array(
         DataType::Utf8
             if rows
                 .first()
-                .is_some_and(|r| renders_as_text(r.columns()[idx].column_type())) =>
+                .is_some_and(|r| utf8_is_rendered(r.columns()[idx].column_type())) =>
         {
             let mut b = StringBuilder::new();
             for row in rows {
@@ -786,9 +799,7 @@ fn build_array(
                     Some(dt) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
-                        Some(crate::types::timestamp_nanos_or_refuse(
-                            dt, "mssql", column
-                        )?)
+                        Some(timestamp_nanos_or_refuse(dt, NanosSource::Mssql, column)?)
                     ) {
                         Some(ns) => b.append_value(ns),
                         None => b.append_null(),
@@ -1111,7 +1122,7 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
     }
     fn utf8(&self, col: usize, row: usize) -> Option<Cow<'_, [u8]>> {
         let r = &self.rows[row];
-        if renders_as_text(r.columns()[col].column_type()) {
+        if utf8_is_rendered(r.columns()[col].column_type()) {
             return cell(r, col)
                 .and_then(cell_text)
                 .map(|s| Cow::Owned(s.into_bytes()));
@@ -1336,6 +1347,50 @@ mod tests {
         let v = batch.column(1).as_string::<i32>();
         assert_eq!(v.value(0), "42");
         assert!(v.is_null(1));
+    }
+
+    /// A date-time cell of any year, declared `text`, builds as the server's own text and passes the value checksum.
+    #[test]
+    fn a_date_time_declared_text_builds_the_servers_text_in_any_year() {
+        use arrow::array::{Array, AsArray};
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |days, inc, scale| DateTime2::new(Date::new(days), Time::new(inc, scale));
+        let row = |a: ColumnData<'static>, b: ColumnData<'static>| {
+            Row::builder()
+                .column("a", ColumnType::Datetime2, a)
+                .column("b", ColumnType::DatetimeOffsetn, b)
+                .build()
+        };
+        let rows = vec![
+            row(
+                ColumnData::DateTime2(Some(dt2(0, 1_234_567, 7))),
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(dt2(0, 1_234_567, 7), 330))),
+            ),
+            row(
+                ColumnData::DateTime2(Some(dt2(3_652_058, 863_999_999_999, 7))),
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(3_652_058, 863_999_999_999, 7),
+                    0,
+                ))),
+            ),
+            row(
+                ColumnData::DateTime2(None),
+                ColumnData::DateTimeOffset(None),
+            ),
+        ];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+        ]));
+        let batch =
+            mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new()).unwrap();
+        let a = batch.column(0).as_string::<i32>();
+        let b = batch.column(1).as_string::<i32>();
+        assert_eq!(a.value(0), "0001-01-01 00:00:00.1234567");
+        assert_eq!(a.value(1), "9999-12-31 23:59:59.9999999");
+        assert_eq!(b.value(0), "0001-01-01 05:30:00.1234567 +05:30");
+        assert_eq!(b.value(1), "9999-12-31 23:59:59.9999999 +00:00");
+        assert!(a.is_null(2) && b.is_null(2));
     }
 
     /// Side A of a text column MISMATCHES an Arrow column whose cell was corrupted.

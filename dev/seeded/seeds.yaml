@@ -5875,6 +5875,38 @@ seeds:
         na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: mssql-text-over-datetime-refused
+    class: "a SQL Server `datetime2`, `datetimeoffset`, `datetime` or `smalldatetime` column declared `text` under `columns:` is refused with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, so a value past 1677..2262 that the refusal says to deliver as text has no remedy"
+    history: "ADR-0038 CP1, owner rule 2026-11-24: a value the native type cannot hold is delivered as its server text; the SQL Server override table read no text for a temporal"
+    scope: source
+    engines:
+      mssql:
+        switch: mssql-text-over-datetime-refused
+        cells: [a_temporal_column_declared_text_is_delivered_as_the_servers_text, a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
+      postgres:
+        na: "the PostgreSQL table (postgres_reads) is a separate read, changed by its own PR"
+      mysql:
+        na: "the MySQL table (mysql_reads) already reads a text override over a date-time and no MySQL value is refused for its range"
+      oracle:
+        na: "an Oracle text override over a timestamp is read by its own table (oracle_reads) and is no part of this class"
+      mongo:
+        na: "a document source has no declared column wire type"
+  - name: cdc-leg-mssql-datetime-text
+    class: "a SQL Server CDC baseline leg declared `text` over a `datetime2`, `datetimeoffset`, `datetime` or `smalldatetime` column delivers the server's own text while the change stream renders the same cell in its own form (`.000000100` against `.0000001`, a UTC-shifted offset, `.996667` against `.997`), so one `__changes` log holds two spellings of a cell"
+    history: "ADR-0038 CP1, 2026-11-25 verifier of the SQL Server text declaration: the CDC baseline accepted the declaration the batch table now reads, and the stream's text differs"
+    scope: source
+    engines:
+      mssql:
+        switch: cdc-leg-mssql-datetime-text
+        cells: [a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_delivers]
+      postgres:
+        na: "the PostgreSQL override table is a separate read, guarded for its CDC baseline leg by its own change"
+      mysql:
+        na: "this class is the SQL Server override table's text arm; the MySQL table is not changed by it"
+      oracle:
+        na: "this class is the SQL Server override table's text arm; the Oracle table is not changed by it"
+      mongo:
+        na: "a document source has no declared column wire type"
   - name: oracle-ltz-year-past-ceiling-delivered
     class: "an Oracle TIMESTAMP WITH LOCAL TIME ZONE value Oracle stored a year past either end of its own 4712 BC to 9999 range (a session whose zone is ahead of or behind UTC wrote a value within its offset of an end) is delivered as the instant 10000-12-31 23:59:59 UTC, exit 0, fidelity exact, instead of being refused by code"
     history: "2026-11-22 probe of the type ledger (rows-156 report, HIGH finding 1): Parquet int64 253433923199000000 against 253402300799000000 for the TZ column with the same literal; the matrix recorded the shift as an accepted form since #1069"
@@ -6003,7 +6035,7 @@ seeds:
       postgres:
         na: "the PostgreSQL stream text stays chrono form while batch delivers the server's text, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
       mssql:
-        na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
+        na: "a datetime2 declared text is delivered as the server's text by batch and refused by code on a CDC baseline (mssql_a_datetime2_declared_text_is_delivered_by_batch_and_refused_on_a_cdc_baseline), so the stream's own text never meets it in one log"
       mongo:
         na: "a document source reads its document as plain text and refuses any other column retype, so no per-column text override over a date exists"
   - name: pg-temporal-uuid-bytea-array-refused
