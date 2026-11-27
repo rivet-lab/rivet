@@ -2431,6 +2431,7 @@ def _self_test() -> None:
     _folded_duplicate_self_test()
     _key_absent_self_test()
     _mssql_query_projection_self_test()
+    _mysql_server_render_self_test()
     print("rig_oracle self-test ok")
 
 
@@ -2524,6 +2525,13 @@ def _mssql_query_projection_self_test() -> None:
     assert sql == "SELECT [id], CONVERT(varchar(max), [t2], 121) AS [t2], [o]]k] FROM (SELECT id, t2 FROM t) AS rivet_q", sql
     assert drawn == {"t2": "DATETIME2"}, drawn
     assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
+
+
+def _mysql_server_render_self_test() -> None:
+    """No MySQL server-side render pads with LPAD, which cuts a value longer than its width (an 838-hour TIME lost a digit)."""
+    rows, _ = ledger("mysql", "batch")
+    served = {n: _render(r)["server"] for n, r in rows.items() if _render(r).get("server")}
+    assert served and not [n for n, e in served.items() if "LPAD(" in e.upper()], served
 
 
 def _folded_duplicate_self_test() -> None:
