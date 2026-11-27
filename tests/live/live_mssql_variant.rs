@@ -101,8 +101,6 @@ fn a_cdc_capture_delivers_sql_variant_and_udt_columns_as_the_source_renders_them
 
 const GEO_COLS: &str = "id INT PRIMARY KEY, g geometry, gg geography";
 
-const NO_UDT_ORACLE: &str = "sql_variant / CLR UDT: the DuckDB mssql scanner renders ToString()/WKB or cannot read the column where rivet delivers the wire bytes; the oracle is the server's own rendering through sqlcmd";
-
 /// One INSERT per row: SRID 0 and 4326, NULL, empty, curve types, and a Z/M point.
 fn geo_inserts(table: &str) -> Vec<String> {
     [
@@ -246,7 +244,7 @@ fn a_batch_export_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_
     }
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
     assert_eq!(want.len(), 8, "oracle rows: {want:?}");
-    let rig = Rig::mssql_batch(&table).no_oracle(NO_UDT_ORACLE);
+    let rig = Rig::mssql_batch(&table);
     rig.run_ok();
     let dir = rig.out_dir();
     assert_eq!(geo_delivered(&dir, "g", "gg"), want);
@@ -258,8 +256,7 @@ fn a_batch_export_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
 fn a_cdc_capture_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_of_every_value() {
-    let mut sc =
-        CdcScenario::mssql_with("mssql_cdc_geo", GEO_COLS, |r, _| r.no_oracle(NO_UDT_ORACLE));
+    let mut sc = CdcScenario::mssql_with("mssql_cdc_geo", GEO_COLS, |r, _| r);
     sc.rig.run_ok();
     let table = sc.table.clone();
     for sql in geo_inserts(&table) {
@@ -290,20 +287,16 @@ fn a_query_with_stasbinary_and_stsrid_delivers_wkb_and_the_srid_not_the_clr_hex(
     let clr = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
     assert_eq!(want.len(), 8, "oracle rows: {want:?}");
     assert_ne!(want, clr, "the WKB is not the CLR hex");
-    let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
-        .query(&format!(
-            "SELECT id, g.STAsBinary() AS g_wkb, gg.STAsBinary() AS gg_wkb FROM dbo.{table}"
-        ));
+    let rig = Rig::mssql_batch(&table).query(&format!(
+        "SELECT id, g.STAsBinary() AS g_wkb, gg.STAsBinary() AS gg_wkb FROM dbo.{table}"
+    ));
     rig.run_ok();
     assert_eq!(geo_delivered(&rig.out_dir(), "g_wkb", "gg_wkb"), want);
     let srid = |c: &str| format!("CAST({c}.STSrid AS varchar(10))");
     let want_srid = geo_source("rivet-mssql-1", &table, &srid("g"), &srid("gg"));
-    let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
-        .query(&format!(
-            "SELECT id, g.STSrid AS g_srid, gg.STSrid AS gg_srid FROM dbo.{table}"
-        ));
+    let rig = Rig::mssql_batch(&table).query(&format!(
+        "SELECT id, g.STSrid AS g_srid, gg.STSrid AS gg_srid FROM dbo.{table}"
+    ));
     rig.run_ok();
     assert_eq!(
         geo_delivered(&rig.out_dir(), "g_srid", "gg_srid"),
@@ -329,7 +322,7 @@ fn a_batch_export_labels_hierarchyid_hex_bytes_and_keeps_the_clr_hex_of_every_va
     }
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("h"), &clr_hex("hh"));
     assert_eq!(want.len(), 3, "oracle rows: {want:?}");
-    let rig = Rig::mssql_batch(&table).no_oracle(NO_UDT_ORACLE);
+    let rig = Rig::mssql_batch(&table);
     rig.run_ok();
     let dir = rig.out_dir();
     assert_eq!(geo_delivered(&dir, "h", "hh"), want);
@@ -337,30 +330,40 @@ fn a_batch_export_labels_hierarchyid_hex_bytes_and_keeps_the_clr_hex_of_every_va
     assert_hex_bytes_labelled(&dir, "hh");
 }
 
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn a_hierarchyid_primary_key_is_refused_as_a_keyset_key_before_the_first_write() {
+/// Runs a chunked export keyed on a hierarchyid PK of `rows` rows and asserts the refusal: exit 1, its code, its text, no part written.
+fn assert_hierarchyid_key_refused(rows: usize, chunk_size: Option<usize>) {
     require_alive(LiveService::Mssql);
     let table = unique_name("mssql_hier_key");
     mssql_exec(&format!(
         "CREATE TABLE dbo.{table} (h hierarchyid NOT NULL PRIMARY KEY, v INT NOT NULL)"
     ));
     let _guard = MssqlTable::adopt(table.clone());
-    for (i, path) in ["/", "/1/", "/2/", "/3/", "/4/", "/5/"].iter().enumerate() {
+    for i in 0..rows {
+        let path = if i == 0 {
+            "/".to_string()
+        } else {
+            format!("/{i}/")
+        };
         mssql_exec(&format!(
             "INSERT INTO dbo.{table} VALUES (hierarchyid::Parse('{path}'), {i})"
         ));
     }
     let tmp = tempfile::tempdir().expect("tmpdir");
     let out_dir = tmp.path().join("out");
-    let rig = Rig::mssql_batch(&table)
+    let mut rig = Rig::mssql_batch(&table)
         .mode("chunked")
         .export_line("chunk_by_key: h")
-        .export_line("chunk_size: 2")
         .dest_path(out_dir.clone());
+    if let Some(n) = chunk_size {
+        rig = rig.export_line(&format!("chunk_size: {n}"));
+    }
     let out = rig.run_args(&[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a hierarchyid key must be refused");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a hierarchyid key must be refused: {stderr}"
+    );
     assert!(
         stderr.contains("RIVET_PLAN_CHUNK_KEY_UNUSABLE")
             && stderr.contains(
@@ -380,6 +383,18 @@ fn a_hierarchyid_primary_key_is_refused_as_a_keyset_key_before_the_first_write()
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
+fn a_hierarchyid_primary_key_is_refused_as_a_keyset_key_before_the_first_write() {
+    assert_hierarchyid_key_refused(6, Some(2));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_hierarchyid_primary_key_on_a_table_smaller_than_chunk_size_is_refused_too() {
+    assert_hierarchyid_key_refused(3, Some(100));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
 fn a_columns_text_declaration_on_a_geometry_column_still_delivers_the_clr_hex_unlabelled() {
     require_alive(LiveService::Mssql);
     let table = unique_name("mssql_geo_decl");
@@ -389,9 +404,7 @@ fn a_columns_text_declaration_on_a_geometry_column_still_delivers_the_clr_hex_un
         mssql_exec(&sql);
     }
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
-    let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
-        .export_line("columns: {g: text, gg: text}");
+    let rig = Rig::mssql_batch(&table).export_line("columns: {g: text, gg: text}");
     rig.run_ok();
     let dir = rig.out_dir();
     assert_eq!(geo_delivered(&dir, "g", "gg"), want);
@@ -410,7 +423,7 @@ fn a_geometry_column_a_previous_release_wrote_is_not_drift_under_fail_and_keeps_
     }
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
     let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
+        .no_oracle("the first run is the previous release, whose parts carry no text form; the ledger grades the hex_bytes label this release adds, so the cell asserts both runs itself")
         .export_line("on_schema_drift: fail");
     let Some(old) = rig.as_previous_release() else {
         return;
@@ -471,7 +484,6 @@ fn a_labelled_geometry_column_loads_into_clickhouse_and_unhex_recovers_the_clr_b
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
     let db = ChDb::new();
     let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
         .dest_gcs(
             GEO_WAREHOUSE_BUCKET,
             &unique_name("geoch"),
@@ -509,7 +521,6 @@ fn a_labelled_geometry_column_loads_into_bigquery_and_from_hex_recovers_the_clr_
     let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
     let _cleanup = bq.cleanup(&[&table]);
     let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_UDT_ORACLE)
         .dest_gcs_live(&bq.bucket, &format!("{}/{table}", bq.prefix))
         .top_line(&bq.load_line(""));
     rig.run_ok();
