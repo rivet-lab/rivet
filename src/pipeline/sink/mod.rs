@@ -92,6 +92,19 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) partition: PartBudget,
 }
 
+/// Digits a value of this field takes per source byte: 2 for hex WKB text, so the ceiling reads the bytes the source held, 1 otherwise.
+fn hex_digits_per_byte(field: &arrow::datatypes::Field) -> usize {
+    match field.metadata().get(crate::types::META_TEXT_FORM) {
+        Some(form)
+            if form == crate::types::TextForm::HexWkb.label()
+                && seeded!("mysql-spatial-ceiling-on-hex", false, true) =>
+        {
+            2
+        }
+        _ => 1,
+    }
+}
+
 /// Whether the byte cap closes the current part.
 fn should_split(written: u64, max_file_size: Option<u64>, part_rows: usize) -> bool {
     max_file_size.is_some_and(|max| written >= max) && part_rows > 0
@@ -543,15 +556,24 @@ impl ExportSink {
         let schema = batch.schema();
         for (idx, field) in schema.fields().iter().enumerate() {
             let col = batch.column(idx);
+            let per_byte = hex_digits_per_byte(field);
             let over: Option<usize> = match field.data_type() {
-                DataType::Utf8 => col
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .and_then(|a| a.iter().flatten().map(|s| s.len()).find(|&n| n > limit)),
-                DataType::LargeUtf8 => col
-                    .as_any()
-                    .downcast_ref::<LargeStringArray>()
-                    .and_then(|a| a.iter().flatten().map(|s| s.len()).find(|&n| n > limit)),
+                DataType::Utf8 => col.as_any().downcast_ref::<StringArray>().and_then(|a| {
+                    a.iter()
+                        .flatten()
+                        .map(|s| s.len() / per_byte)
+                        .find(|&n| n > limit)
+                }),
+                DataType::LargeUtf8 => {
+                    col.as_any()
+                        .downcast_ref::<LargeStringArray>()
+                        .and_then(|a| {
+                            a.iter()
+                                .flatten()
+                                .map(|s| s.len() / per_byte)
+                                .find(|&n| n > limit)
+                        })
+                }
                 DataType::Binary => col
                     .as_any()
                     .downcast_ref::<BinaryArray>()
