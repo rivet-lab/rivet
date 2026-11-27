@@ -183,10 +183,15 @@ works the same way: name it in `named_collection:`.
   `DateTime64(p)`, which ClickHouse shows in the server's time zone; rivet keeps loading
   such a table and warns with the `ALTER TABLE ... MODIFY COLUMN` that declares it in UTC
   (the stored instants do not change; a key column cannot be altered).
-- **Types that land as something else.** `uuid` lands as `FixedString(16)` (the 16 raw
-  bytes; the type report carries the `toUUID` expression to recover it), `json`/`jsonb`
-  as `String` holding the JSON text, and `time` as `Decimal64` seconds since midnight.
-  `rivet check --type-report --target clickhouse` lists each one.
+- **Types that land as something else.** `json`/`jsonb` as `String` holding the JSON text and
+  `time` as `Decimal64` seconds since midnight. `rivet check --type-report --target clickhouse`
+  lists each one.
+- **UUID.** `uuid` (PostgreSQL `uuid` and `uuid[]`, SQL Server `uniqueidentifier`) lands as a
+  native `UUID` (`Array(Nullable(UUID))` for a list). A change log an earlier release
+  created with `FixedString(16)` bytes is refused before anything is written, with the
+  four `ALTER TABLE` statements that convert the column in place (not possible for a
+  key column) or the drop-and-reload that takes the new type; a `mode: full` load
+  replaces the table by swap, so it needs no step.
 - **A NULL array is refused.** A ClickHouse `Array` cannot be NULL, so a NULL array would
   load as `[]`, the same value as an empty array. A load whose parts hold one stops before
   any table is created, with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` naming the column. In

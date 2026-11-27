@@ -1254,9 +1254,7 @@ fn uuid_json_time_and_array_columns_load_with_their_values() {
 
     let table = format!("{}.{tbl}", db.0);
     let got = clickhouse_rows_tsv(&format!(
-        "SELECT id, if(u IS NULL, '', toString(toUUID(concat(substring(lower(hex(u)),1,8),'-',\
-         substring(lower(hex(u)),9,4),'-',substring(lower(hex(u)),13,4),'-',\
-         substring(lower(hex(u)),17,4),'-',substring(lower(hex(u)),21,12))))), \
+        "SELECT id, ifNull(toString(u), ''), \
          ifNull(j, ''), ifNull(toString(t), ''), toString(a) FROM {table} ORDER BY id FORMAT TSV"
     ));
     let rows: Vec<Vec<&str>> = got.lines().map(|l| l.split('\t').collect()).collect();
@@ -1271,6 +1269,441 @@ fn uuid_json_time_and_array_columns_load_with_their_values() {
     assert_eq!(rows[0][4], "[1,2]", "array");
     assert_eq!(&rows[1][1..4], ["", "", ""], "NULLs stay NULL");
     assert_eq!(rows[1][4], "[]", "an empty array loads as []");
+}
+
+/// The type ClickHouse's catalog holds for `column` of `database`.`table`.
+fn catalog_type(database: &str, table: &str, column: &str) -> String {
+    ch(&format!(
+        "SELECT type FROM system.columns WHERE database = '{database}' AND table = '{table}' \
+         AND name = '{column}' FORMAT TSVRaw"
+    ))
+}
+
+/// `id\tvalue` lines of a uuid column as ClickHouse prints it, a NULL as empty.
+fn clickhouse_rows_uuid_lines(table: &str, column: &str) -> Vec<String> {
+    ch(&format!(
+        "SELECT concat(toString(id), '\t', ifNull(toString({column}), 'NULL')) FROM {table} \
+         ORDER BY id FORMAT TSVRaw"
+    ))
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
+const UUID_EDGES: [&str; 5] = [
+    "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    "01020304-0506-0708-090a-0b0c0d0e0f10",
+    "00000000-0000-0000-0000-000000000000",
+    "ffffffff-ffff-ffff-ffff-ffffffffffff",
+    "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+];
+
+/// PostgreSQL `uuid` and `uuid[]` load as native `UUID` and `Array(Nullable(UUID))`, each value the text the source holds.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_uuid");
+    let [a, b, zero, full, v1] = UUID_EDGES;
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID, ua UUID[]); \
+         INSERT INTO {tbl} VALUES \
+           (1, '{a}', ARRAY['{b}'::uuid, NULL, '{v1}'::uuid]), \
+           (2, NULL, NULL), \
+           (3, '{zero}', '{{}}'), \
+           (4, '{full}', ARRAY['{a}'::uuid])"
+    ))
+    .expect("seed");
+    let _t = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(Rig::pg_batch(&tbl).mode("full"), &db);
+    rig.run_ok();
+    load(&rig);
+
+    assert_eq!(catalog_type(&db.0, &tbl, "u"), "Nullable(UUID)");
+    assert_eq!(catalog_type(&db.0, &tbl, "ua"), "Array(Nullable(UUID))");
+    let table = format!("{}.{tbl}", db.0);
+    let source: Vec<String> = c
+        .query(
+            &format!("SELECT id, coalesce(u::text, ''), coalesce(ua::text, '{{}}') FROM {tbl} ORDER BY id"),
+            &[],
+        )
+        .expect("read source")
+        .iter()
+        .map(|r| {
+            format!(
+                "{}\t{}\t{}",
+                r.get::<_, i64>(0),
+                r.get::<_, String>(1),
+                r.get::<_, String>(2)
+            )
+        })
+        .collect();
+    let got: Vec<String> = clickhouse_rows_tsv(&format!(
+        "SELECT concat(toString(id), '\t', ifNull(toString(u), ''), '\t', '{{', \
+         arrayStringConcat(arrayMap(x -> ifNull(toString(x), 'NULL'), ua), ','), '}}') \
+         FROM {table} ORDER BY id FORMAT TSVRaw"
+    ))
+    .lines()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(got, source, "the values a second client reads back");
+}
+
+/// An incremental export with a `uuid` column lands the first run and a later delta as native `UUID` in the change log behind the view.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_postgres_incremental_uuid_column_loads_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_uinc");
+    let [a, b, zero, full, _] = UUID_EDGES;
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID, updated_at TIMESTAMP NOT NULL); \
+         INSERT INTO {tbl} VALUES (1, '{a}', TIMESTAMP '2026-01-01'), (2, '{b}', TIMESTAMP '2026-01-01'), \
+           (3, NULL, TIMESTAMP '2026-01-01')"
+    ))
+    .expect("seed");
+    let _t = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(
+        Rig::pg_batch(&tbl)
+            .mode("incremental")
+            .export_line("cursor_column: updated_at"),
+        &db,
+    );
+    let view = format!("{}.{tbl}", db.0);
+    let live = || -> Vec<String> {
+        clickhouse_rows_tsv(&format!(
+            "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} ORDER BY id FORMAT TSVRaw"
+        ))
+        .lines()
+        .map(str::to_string)
+        .collect()
+    };
+    let source = |c: &mut postgres::Client| -> Vec<String> {
+        c.query(
+            &format!("SELECT id, coalesce(u::text, 'NULL') FROM {tbl} ORDER BY id"),
+            &[],
+        )
+        .expect("read source")
+        .iter()
+        .map(|r| format!("{}\t{}", r.get::<_, i64>(0), r.get::<_, String>(1)))
+        .collect()
+    };
+
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(live(), source(&mut c));
+
+    c.batch_execute(&format!(
+        "UPDATE {tbl} SET u = '{full}', updated_at = TIMESTAMP '2026-02-01' WHERE id = 1; \
+         INSERT INTO {tbl} VALUES (4, '{zero}', TIMESTAMP '2026-02-01')"
+    ))
+    .expect("changes");
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        catalog_type(&db.0, &format!("{tbl}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+    assert_eq!(live(), source(&mut c));
+}
+
+/// SQL Server `uniqueidentifier` loads as native `UUID`, each value the text the source renders.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql"]
+fn a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_uid");
+    let rows: Vec<String> = UUID_EDGES
+        .iter()
+        .enumerate()
+        .map(|(i, u)| format!("({}, '{}')", i + 1, u.to_uppercase()))
+        .collect();
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{tbl} (id BIGINT PRIMARY KEY, u UNIQUEIDENTIFIER NULL); \
+         INSERT INTO dbo.{tbl} VALUES {}, (9, NULL)",
+        rows.join(", ")
+    ));
+    let _t = MssqlTable::adopt(format!("dbo.{tbl}"));
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(
+        Rig::mssql_batch(&tbl)
+            .query(&format!("SELECT id, u FROM dbo.{tbl}"))
+            .mode("full"),
+        &db,
+    );
+    rig.run_ok();
+    load(&rig);
+
+    assert_eq!(catalog_type(&db.0, &tbl, "u"), "Nullable(UUID)");
+    let source = mssql_query_strings(&format!(
+        "SELECT CONCAT(id, CHAR(9), ISNULL(LOWER(CONVERT(varchar(36), u)), 'NULL')) FROM dbo.{tbl} ORDER BY id"
+    ));
+    assert_eq!(
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        source,
+        "the values a second client reads back"
+    );
+}
+
+/// A SQL Server CDC stream with a `uniqueidentifier` column lands it as native `UUID`: inserted, updated and deleted keys read back as the source holds them.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn a_sql_server_cdc_uniqueidentifier_column_loads_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("rivet_ch_msuid");
+    let ci = format!("dbo_{table}");
+    let [a, b, zero, full, _] = UUID_EDGES;
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id BIGINT PRIMARY KEY, u UNIQUEIDENTIFIER NULL)"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, '{a}'), (2, '{b}'), (3, NULL)"
+    ));
+    wait_for_capture(&ci, 3);
+    let source = || {
+        mssql_cdc_query_strings(&format!(
+            "SELECT CONCAT(id, CHAR(9), ISNULL(LOWER(CONVERT(varchar(36), u)), 'NULL')) \
+             FROM dbo.{table} ORDER BY id"
+        ))
+    };
+    let db = Db::new("rivet_chtest");
+    let rig = into_clickhouse(Rig::mssql_cdc(&table, &ci).cdc("until_current: true"), &db);
+    let view = format!("{}.{table}", db.0);
+    let live = || -> Vec<String> {
+        clickhouse_rows_tsv(&format!(
+            "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} \
+             WHERE NOT __is_deleted ORDER BY id FORMAT TSVRaw"
+        ))
+        .lines()
+        .map(str::to_string)
+        .collect()
+    };
+
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        catalog_type(&db.0, &format!("{table}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+    assert_eq!(live(), source());
+
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (4, '{zero}'); \
+         UPDATE dbo.{table} SET u = '{full}' WHERE id = 1; \
+         DELETE FROM dbo.{table} WHERE id = 2"
+    ));
+    wait_for_capture(&ci, 7);
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(live(), source());
+}
+
+/// A PostgreSQL CDC stream with a `uuid` column lands it as native `UUID`: inserted, updated and deleted keys read back as the source holds them.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_postgres_cdc_uuid_column_loads_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_pguid");
+    let slot = unique_name("rivet_ch_slot");
+    let _slot = Slot::new(slot.clone());
+    let [a, b, zero, full, _] = UUID_EDGES;
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID); \
+         INSERT INTO {tbl} VALUES (1, '{a}'), (2, '{b}'), (3, NULL)"
+    ))
+    .expect("seed");
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = into_clickhouse(Rig::pg_cdc(&tbl, &slot), &db);
+    let view = format!("{}.{tbl}", db.0);
+    let live = || -> Vec<String> {
+        clickhouse_rows_tsv(&format!(
+            "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} \
+             WHERE NOT __is_deleted ORDER BY id FORMAT TSVRaw"
+        ))
+        .lines()
+        .map(str::to_string)
+        .collect()
+    };
+    let source = |c: &mut postgres::Client| -> Vec<String> {
+        c.query(
+            &format!("SELECT id, coalesce(u::text, 'NULL') FROM {tbl} ORDER BY id"),
+            &[],
+        )
+        .expect("read source")
+        .iter()
+        .map(|r| format!("{}\t{}", r.get::<_, i64>(0), r.get::<_, String>(1)))
+        .collect()
+    };
+
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        catalog_type(&db.0, &format!("{tbl}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+    assert_eq!(live(), source(&mut c));
+
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (4, '{zero}'); \
+         UPDATE {tbl} SET u = '{full}' WHERE id = 1; \
+         DELETE FROM {tbl} WHERE id = 2"
+    ))
+    .expect("changes");
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(live(), source(&mut c));
+}
+
+/// A change log an earlier release loaded with `FixedString(16)` bytes is refused by code before anything is written, naming the column, the cause and a remedy that works.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_change_log_holding_uuid_as_fixed_string_is_refused_with_a_working_remedy() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_uuidlog");
+    let [a, b, ..] = UUID_EDGES;
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID, updated_at TIMESTAMP NOT NULL); \
+         INSERT INTO {tbl} VALUES (1, '{a}', TIMESTAMP '2026-01-01')"
+    ))
+    .expect("seed");
+    let _t = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(
+        Rig::pg_batch(&tbl)
+            .mode("incremental")
+            .export_line("cursor_column: updated_at"),
+        &db,
+    );
+    let log = format!("{}.{tbl}__changes", db.0);
+    rig.run_ok();
+    load(&rig);
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (2, '{b}', TIMESTAMP '2026-02-01')"
+    ))
+    .expect("delta");
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        catalog_type(&db.0, &format!("{tbl}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+
+    for st in [
+        format!("ALTER TABLE {log} ADD COLUMN u_old Nullable(FixedString(16))"),
+        format!(
+            "ALTER TABLE {log} UPDATE u_old = toFixedString(unhex(replaceAll(toString(u), '-', '')), 16) \
+             WHERE 1 SETTINGS mutations_sync = 2"
+        ),
+        format!("ALTER TABLE {log} DROP COLUMN u"),
+        format!("ALTER TABLE {log} RENAME COLUMN u_old TO u"),
+    ] {
+        ch(&st);
+    }
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (3, '{a}', TIMESTAMP '2026-03-01')"
+    ))
+    .expect("second delta");
+    rig.run_ok();
+    let before = ch(&format!("SELECT count() FROM {log} FORMAT TSV"));
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert!(!out.status.success(), "the load must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("RIVET_LOAD_TARGET_OBJECT_CONFLICT")
+            && err.contains(&format!(
+                "column `u` of `{log}` holds UUIDs as FixedString(16) raw bytes"
+            ))
+            && err.contains("Or take the new type"),
+        "{err}"
+    );
+    assert_eq!(
+        ch(&format!("SELECT count() FROM {log} FORMAT TSV")),
+        before,
+        "nothing written"
+    );
+    let mut statements: Vec<&str> = Vec::new();
+    for l in err.lines() {
+        if l.starts_with(&format!("ALTER TABLE {log} ")) && !statements.contains(&l) {
+            statements.push(l);
+        }
+    }
+    assert_eq!(statements.len(), 4, "{err}");
+    for st in statements {
+        ch(st);
+    }
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert!(
+        out.status.success(),
+        "the remedy must clear the refusal: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        catalog_type(&db.0, &format!("{tbl}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+    assert_eq!(
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        [format!("1\t{a}"), format!("2\t{b}"), format!("3\t{a}")]
+    );
+}
+
+/// A whole-table load over a table an earlier release landed with `FixedString(16)` replaces it with the native `UUID` column.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_full_load_replaces_a_fixed_string_uuid_table_with_the_native_column() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_uuidfull");
+    let [a, ..] = UUID_EDGES;
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID); INSERT INTO {tbl} VALUES (1, '{a}')"
+    ))
+    .expect("seed");
+    let _t = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(Rig::pg_batch(&tbl).mode("full"), &db);
+    rig.run_ok();
+    load(&rig);
+    ch(&format!("DROP TABLE {}.{tbl}", db.0));
+    ch(&format!(
+        "CREATE TABLE {}.{tbl} (id Int64, u Nullable(FixedString(16))) ENGINE = MergeTree ORDER BY tuple()",
+        db.0
+    ));
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(catalog_type(&db.0, &tbl, "u"), "Nullable(UUID)");
+    assert_eq!(
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        [format!("1\t{a}")]
+    );
 }
 
 /// One CDC cycle staged on `dest`, loaded into ClickHouse — by rivet sending each part,
