@@ -299,13 +299,13 @@ def section(body: str, heading: re.Pattern) -> str:
 
 
 def declared_amount(name: str, body: str, sign: int) -> int:
-    """The loosening the body's "Ratchets raised" section allows pin `name`: the largest `a -> b` step in its direction or `+N` on a line naming it, else 0."""
+    """The loosening the body's "Ratchets raised" section allows pin `name`: the first `a -> b` step in its direction or `+N` after each mention of it, else 0."""
     best = 0
     for line in section(body, RATCHET_HEADING).splitlines():
-        if name not in line:
-            continue
-        for m in FIGURE.finditer(line):
-            best = max(best, int(m.group(3)) if m.group(3) else (int(m.group(2)) - int(m.group(1))) * sign)
+        for hit in re.finditer(re.escape(name), line):
+            m = FIGURE.search(line, hit.end())
+            if m:
+                best = max(best, int(m.group(3)) if m.group(3) else (int(m.group(2)) - int(m.group(1))) * sign)
     return best
 
 
@@ -710,6 +710,9 @@ def self_test() -> int:
     assert len(undeclared(up, "## Ratchets raised\n- silent 39 -> 38: why\n")) == 1, "a step in the other direction allows nothing"
     assert len(undeclared(["tests/offline/s.rs:silent 39 -> 41"], "## Ratchets raised\n- silent 39 -> 40: why\n")) == 1, "a raise of 2 over a declared 1 must fail"
     assert undeclared(["tests/offline/s.rs:independent 106 -> 105"], "## Ratchets raised\n- independent 106 -> 105: why\n") == [], "a floor loosens downwards"
+    two = ["f:a 1 -> 3", "f:b 5 -> 6"]
+    assert undeclared(two, "## Ratchets raised\n- a 1 -> 3; b 5 -> 6: why\n") == [], "each pin takes the step written after its own name"
+    assert len(undeclared(two, "## Ratchets raised\n- a 1 -> 2; b 5 -> 6: why\n")) == 1, "a neighbour's larger step does not allow a pin more"
     assert undeclared(["f:gone 1 -> removed"], "## Ratchets raised\n- gone: moved\n") == []
     assert rows_holding("# h\n  - id: a\n    x: { gap: 1 }\n    y: { gap: 2 }\n  - id: b\n    z: 1\n  - id: c\n    contradicted_by:\n", "^  - id:", "gap:|contradicted_by:") == 2
     assert PIN_NAME.match("const NO_ORACLE_CEILING: usize = 21;") and PIN_NAME.match("gap_ratchet: 2")
