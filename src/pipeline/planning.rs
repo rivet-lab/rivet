@@ -63,6 +63,7 @@ pub(crate) fn plan_batch_export(
         config,
         export,
         &plan,
+        crate::plan::build::connect_source,
     )?;
     refuse_text_the_stream_renders_otherwise(
         config,
@@ -78,38 +79,48 @@ pub(crate) fn plan_batch_export(
     Ok(PlannedExport { plan, diags })
 }
 
-/// Refuses a CDC baseline leg that declares `text` over a SQL Server date-time: the leg delivers the server's own text, the change stream renders the same cell in its own form into the same `__changes` log; with no catalog to read the guard admits.
+/// Refuses a CDC baseline leg that declares `text` over a SQL Server date-time: the leg delivers the server's own text, the change stream renders the same cell in its own form into the same `__changes` log; a source it cannot read leaves the guard with a warning and no refusal.
 fn refuse_mssql_datetime_text_in_a_cdc_baseline(
     probe: Option<&mut dyn Source>,
     config: &Config,
     export: &ExportConfig,
     plan: &ResolvedRunPlan,
+    connect: impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>,
 ) -> Result<()> {
-    let parent = export.snapshot_parent.as_deref();
     let source_type = config.source.source_type;
-    if seeded!("cdc-leg-mssql-datetime-text", true, false)
-        || mssql_cdc_baseline_parent(parent, source_type, &plan.column_overrides).is_none()
-    {
+    if seeded!("cdc-leg-mssql-datetime-text", true, false) {
         return Ok(());
     }
-    let Some(probe) = probe else {
+    let Some(parent) = mssql_cdc_baseline_parent(
+        export.snapshot_parent.as_deref(),
+        source_type,
+        &plan.column_overrides,
+    ) else {
         return Ok(());
     };
-    let Ok(detected) = probe.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
+    let Some(detected) =
+        catalog_for_text_check(parent, &config.source, &plan.base_query, probe, connect)
     else {
         return Ok(());
     };
-    refuse_mssql_datetime_text_declared(parent, source_type, &detected, &plan.column_overrides)
+    refuse_mssql_datetime_text_declared(
+        Some(parent),
+        source_type,
+        &detected,
+        &plan.column_overrides,
+    )
 }
 
-/// The parent export when this is a SQL Server CDC baseline leg that declares any `columns:` override.
+/// The parent export when this is a SQL Server CDC baseline leg that declares a `columns:` override `text`.
 fn mssql_cdc_baseline_parent<'a>(
     snapshot_parent: Option<&'a str>,
     source_type: crate::config::SourceType,
     overrides: &crate::types::ColumnOverrides,
 ) -> Option<&'a str> {
-    snapshot_parent
-        .filter(|_| source_type == crate::config::SourceType::Mssql && !overrides.is_empty())
+    snapshot_parent.filter(|_| {
+        source_type == crate::config::SourceType::Mssql
+            && crate::types::override_table::declares_text(overrides)
+    })
 }
 
 /// The coded refusal for a SQL Server CDC baseline leg whose `overrides` declare text over a column of `detected` that is a date-time.
@@ -177,27 +188,10 @@ fn refuse_text_the_stream_renders_otherwise(
     {
         return Ok(());
     }
-    let mut own;
-    let src: &mut dyn Source = match probe {
-        Some(probe) => probe,
-        None => match connect(&config.source) {
-            Ok(connected) => {
-                own = connected;
-                own.as_mut()
-            }
-            Err(e) => {
-                warn_text_declaration_unchecked(parent, "connect", &e);
-                return Ok(());
-            }
-        },
-    };
-    let detected = match src.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
-    {
-        Ok(detected) => detected,
-        Err(e) => {
-            warn_text_declaration_unchecked(parent, "describe", &e);
-            return Ok(());
-        }
+    let Some(detected) =
+        catalog_for_text_check(parent, &config.source, &plan.base_query, probe, connect)
+    else {
+        return Ok(());
     };
     let Some(declared) = server_text_declared(Engine::Postgres, &detected, &plan.column_overrides)
     else {
@@ -212,6 +206,37 @@ fn refuse_text_the_stream_renders_otherwise(
          was delivered. Remove `{column}` from `columns:`: the baseline and the stream then \
          both deliver the `{native}` column's own type."
     )
+}
+
+/// The catalog a baseline leg's text check reads, on the caller's probe or on a connection opened for it; a source it cannot connect to or describe draws the unchecked warning and no catalog.
+fn catalog_for_text_check(
+    parent: &str,
+    source: &crate::config::SourceConfig,
+    base_query: &str,
+    probe: Option<&mut dyn Source>,
+    connect: impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>,
+) -> Option<Vec<crate::types::TypeMapping>> {
+    let mut own;
+    let src: &mut dyn Source = match probe {
+        Some(probe) => probe,
+        None => match connect(source) {
+            Ok(connected) => {
+                own = connected;
+                own.as_mut()
+            }
+            Err(e) => {
+                warn_text_declaration_unchecked(parent, "connect", &e);
+                return None;
+            }
+        },
+    };
+    match src.type_mappings(base_query, &crate::types::ColumnOverrides::new()) {
+        Ok(detected) => Some(detected),
+        Err(e) => {
+            warn_text_declaration_unchecked(parent, "describe", &e);
+            None
+        }
+    }
 }
 
 /// The warning that the text-declaration check of a baseline leg did not run because the source could not be read.
@@ -1072,8 +1097,13 @@ mod tests {
         plan.column_overrides = declare(RivetType::Text);
         let run = |config: &Config, export: &ExportConfig, plan: &ResolvedRunPlan| {
             let mut src = CountingSource(std::cell::Cell::new(0), vec![dated("datetime2")]);
-            let out =
-                refuse_mssql_datetime_text_in_a_cdc_baseline(Some(&mut src), config, export, plan);
+            let out = refuse_mssql_datetime_text_in_a_cdc_baseline(
+                Some(&mut src),
+                config,
+                export,
+                plan,
+                |_| panic!("a held probe must not open a second connection"),
+            );
             (out, src.0.get())
         };
         let (out, reads) = run(&mssql, &leg, &plan);
@@ -1088,8 +1118,80 @@ mod tests {
         let (out, reads) = run(&mssql, &leg, &bare);
         assert!(out.is_ok() && reads == 0, "no override reads nothing");
         assert!(
-            refuse_mssql_datetime_text_in_a_cdc_baseline(None, &mssql, &leg, &plan).is_ok(),
+            refuse_mssql_datetime_text_in_a_cdc_baseline(None, &mssql, &leg, &plan, unreachable)
+                .is_ok(),
             "no catalog admits"
         );
+    }
+
+    /// A SQL Server baseline leg whose catalog cannot be reached, for want of a connection or a describe, is not refused and draws one masked warning saying the check did not run.
+    #[test]
+    fn an_unreadable_sql_server_baseline_leg_warns_unchecked() {
+        use crate::types::RivetType;
+        crate::pipeline::run::run_tail_tests::install_warn_capture();
+        let mssql = one_export_config("mssql", "");
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.column_overrides = declare(RivetType::Text);
+        let leg = named_leg(&mssql, "mssql_no_probe");
+        assert!(
+            refuse_mssql_datetime_text_in_a_cdc_baseline(None, &mssql, &leg, &plan, unreachable)
+                .is_ok()
+        );
+        let said = warnings_of("mssql_no_probe");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("did not run, the connect failed"),
+            "{said:?}"
+        );
+        let leg = named_leg(&mssql, "mssql_describe_fails");
+        let mut held = DescribeFails;
+        assert!(
+            refuse_mssql_datetime_text_in_a_cdc_baseline(
+                Some(&mut held),
+                &mssql,
+                &leg,
+                &plan,
+                |_| panic!("a held probe must not open a second connection")
+            )
+            .is_ok()
+        );
+        let said = warnings_of("mssql_describe_fails");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("did not run, the describe failed"),
+            "{said:?}"
+        );
+        assert!(!said[0].contains("describe_pw"), "{said:?}");
+    }
+
+    /// A SQL Server baseline leg with no text declaration opens no connection and warns of nothing; one with it reads the catalog on a connection of its own and refuses a date-time declared text.
+    #[test]
+    fn a_sql_server_baseline_leg_connects_only_to_check_a_text_declaration() {
+        use crate::types::{RivetType, TimeUnit};
+        crate::pipeline::run::run_tail_tests::install_warn_capture();
+        let mssql = one_export_config("mssql", "");
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.column_overrides = declare(RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: None,
+        });
+        let leg = named_leg(&mssql, "mssql_nanos_only");
+        assert!(
+            refuse_mssql_datetime_text_in_a_cdc_baseline(None, &mssql, &leg, &plan, |_| panic!(
+                "no text declaration opens no connection"
+            ))
+            .is_ok()
+        );
+        assert!(warnings_of("mssql_nanos_only").is_empty());
+        plan.column_overrides = declare(RivetType::Text);
+        let err = refuse_mssql_datetime_text_in_a_cdc_baseline(
+            None,
+            &mssql,
+            &named_leg(&mssql, "mssql_reconnects"),
+            &plan,
+            |_| Ok(Box::new(ScriptedSource(vec![dated("datetime2")])) as Box<dyn Source>),
+        )
+        .expect_err("a datetime2 declared text, read on a connection of the guard's own");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
     }
 }

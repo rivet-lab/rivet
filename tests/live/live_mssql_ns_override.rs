@@ -82,7 +82,6 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                 "{ctx}: nothing is written before the refusal"
             );
             let table_q = table.clone();
-            let datetime = case.ty == "DATETIME";
             let said = rig.refuses_twice_and_walks_out(
                 &["run"],
                 &[],
@@ -100,11 +99,7 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                     Remedy::new(
                         "Declare `v: text` under `columns:` and rivet delivers the server's own text for every row",
                         Then::DeliversTheSource,
-                        move |r| {
-                            r.rebuilt(|rig| {
-                                ungraded_when_datetime(rig.restage("full", &["columns: {v: text}"]), datetime)
-                            })
-                        },
+                        |r| r.rebuilt(|rig| rig.restage("full", &["columns: {v: text}"])),
                     ),
                     Remedy::new("Declare the column `timestamp`", Then::DeliversTheSource, |r| {
                         r.rebuilt(|rig| rig.restage("full", &["columns: {v: timestamp}"]))
@@ -203,15 +198,6 @@ const TEXT_CASES: &[TextCase] = &[
     },
 ];
 
-/// The rig with its oracle off for a DATETIME column, whose ledger text goes through DATETIME2(7) while the server's own text is the three-digit form.
-fn ungraded_when_datetime(rig: Rig, datetime: bool) -> Rig {
-    if datetime {
-        rig.no_oracle("the ledger renders DATETIME through DATETIME2(7) (.1233333) while the server's own text is .123; graded against CONVERT in a_temporal_column_declared_text_is_delivered_as_the_servers_text")
-    } else {
-        rig
-    }
-}
-
 /// A temporal column declared `text` delivers the server's own `CONVERT(varchar, v, style)` text (style 121, and 120 for SMALLDATETIME, whose precision is the minute) for every value, the year 0001 and 9999 included, and NULL as NULL.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
@@ -219,10 +205,7 @@ fn a_temporal_column_declared_text_is_delivered_as_the_servers_text() {
     require_alive(LiveService::Mssql);
     for case in TEXT_CASES {
         let (table, _guard) = table_of(case.ty, case.values);
-        let rig = ungraded_when_datetime(
-            Rig::mssql_batch(&table).export_line("columns: {v: text}"),
-            case.ty == "DATETIME",
-        );
+        let rig = Rig::mssql_batch(&table).export_line("columns: {v: text}");
         rig.run_ok();
         let want = sqlcmd_lines(
             "rivet-mssql-1",
@@ -258,10 +241,7 @@ fn text_loads_into(kind: WarehouseKind, case: &TextCase) {
     let (table, _guard) = table_of(case.ty, case.values);
     w.adopt(&table);
     let rig = w.shape(
-        ungraded_when_datetime(
-            Rig::mssql_batch(&table).export_line("columns: {v: text}"),
-            case.ty == "DATETIME",
-        ),
+        Rig::mssql_batch(&table).export_line("columns: {v: text}"),
         "id",
     );
     rig.run_ok();
