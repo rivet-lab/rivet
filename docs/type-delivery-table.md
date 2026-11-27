@@ -9,7 +9,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
 | postgres | 77 | 26 | 4 | 0 |
-| mysql | 37 | 43 | 0 | 0 |
+| mysql | 45 | 37 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
 | oracle | 17 | 40 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
@@ -135,7 +135,15 @@ No cell is empty.
 | mysql | `TIME(3)` | `time_beyond_day` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `TIME(5)` | `time_beyond_day` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `ENUM('a\\b','l\nf','c\rr','n\0l','😀','x\\y')` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| mysql | 43 matrix-only rows: `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `MEDIUMINT UNSIGNED`, `BIGINT`, `TINYINT(1) UNSIGNED`, `BIT(2)`, `BIT(16)`, `BIT(32)`, `BIT(63)`, `DECIMAL(1,0)`, `DECIMAL(10,2)`, `DECIMAL(10,2) UNSIGNED`, `DECIMAL(38,0)`, `DECIMAL(38,8)`, `DECIMAL(38,30)`, `DECIMAL(30,30)`, `DECIMAL(39,0)`, `DECIMAL(65,0)`, `DECIMAL(65,30)`, `FLOAT UNSIGNED`, `DOUBLE UNSIGNED`, `FLOAT(10,2)`, `DOUBLE(20,5)`, `CHAR(10)`, `VARCHAR(255)`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `VARBINARY(255)`, `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `DATETIME`, `DATETIME(3)`, `TIMESTAMP(0) NULL`, `TIMESTAMP(3) NULL`, `TIME`, `GEOMETRY`, `POINT`, `LINESTRING`, `POLYGON`, `GEOMETRYCOLLECTION`, `MULTIPOINT` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| mysql | `GEOMETRY` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `POINT` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `LINESTRING` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `POLYGON` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `GEOMETRYCOLLECTION` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTIPOINT` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTILINESTRING` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTIPOLYGON` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | 37 matrix-only rows: `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `MEDIUMINT UNSIGNED`, `BIGINT`, `TINYINT(1) UNSIGNED`, `BIT(2)`, `BIT(16)`, `BIT(32)`, `BIT(63)`, `DECIMAL(1,0)`, `DECIMAL(10,2)`, `DECIMAL(10,2) UNSIGNED`, `DECIMAL(38,0)`, `DECIMAL(38,8)`, `DECIMAL(38,30)`, `DECIMAL(30,30)`, `DECIMAL(39,0)`, `DECIMAL(65,0)`, `DECIMAL(65,30)`, `FLOAT UNSIGNED`, `DOUBLE UNSIGNED`, `FLOAT(10,2)`, `DOUBLE(20,5)`, `CHAR(10)`, `VARCHAR(255)`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `VARBINARY(255)`, `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `DATETIME`, `DATETIME(3)`, `TIMESTAMP(0) NULL`, `TIMESTAMP(3) NULL`, `TIME` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | mssql | `BIGINT` | `Int64` | `exact` | `Nullable(Int64)` | `INT64` | `NUMBER(38,0)` |
 | mssql | `DECIMAL(18,4)` | `Decimal128(18, 4)` | `exact` | `Nullable(Decimal(18, 4))` | `NUMERIC` | `NUMBER(18,4)` |
 | mssql | `BIT` | `Boolean` | `exact` | `Nullable(Bool)` | `BOOL` | `BOOLEAN` |
