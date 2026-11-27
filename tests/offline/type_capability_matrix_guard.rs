@@ -783,7 +783,7 @@ fn a_known_defect_without_today_delivery_is_refused() {
     row_mut(&mut doc, "postgres", "INET")
         .remove("today_delivery")
         .unwrap();
-    row_mut(&mut doc, "postgres", "UUID[]")
+    row_mut(&mut doc, "postgres", "CIDR")
         .get_mut("clickhouse")
         .and_then(Value::as_mapping_mut)
         .unwrap()
