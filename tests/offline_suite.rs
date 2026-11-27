@@ -92,6 +92,8 @@ mod guarantee_matrix_guard;
 mod harness_env_hygiene_guard;
 #[path = "offline/harness_metrics_guard.rs"]
 mod harness_metrics_guard;
+#[path = "offline/jemalloc_decay_guard.rs"]
+mod jemalloc_decay_guard;
 #[path = "offline/keyword_value_credentials.rs"]
 mod keyword_value_credentials;
 #[path = "offline/mssql_column_data_fixture_guard.rs"]

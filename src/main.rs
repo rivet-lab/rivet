@@ -2,6 +2,12 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// jemalloc takes freed pages back after 250 ms, not its 10 s default, so a paged read's freed buffers do not stay resident.
+#[cfg(feature = "jemalloc")]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static malloc_conf: &[u8] = b"dirty_decay_ms:250\0";
+
 fn main() {
     rivet::cli::run_binary();
 }
