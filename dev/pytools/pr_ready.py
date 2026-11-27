@@ -63,6 +63,8 @@ RATCHET_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)ratchets raised", re.I)
 HEADING = re.compile(r"^\s*(?:#+\s|\*\*[^*]+\*\*\s*$)")
 INVARIANTS_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)invariants\b", re.I)
 FIGURE = re.compile(r"(\d+)\s*(?:->|\u2192)\s*(\d+)|(?<![\w.])\+(\d+)\b")
+DECLARED = re.compile(r"[\s:=|]*(?:" + FIGURE.pattern + ")")
+DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 ANSWERED = re.compile(r"\bI([1-5])\b(.*)")
 SEAMS = (
     ("src/cli/", "a command"),
@@ -298,32 +300,56 @@ def section(body: str, heading: re.Pattern) -> str:
     return "\n".join(out)
 
 
-def declared_amount(name: str, body: str, sign: int) -> int:
-    """The loosening the body's "Ratchets raised" section allows pin `name`: the first `a -> b` step in its direction or `+N` after each mention of it, else 0."""
-    best = 0
-    for line in section(body, RATCHET_HEADING).splitlines():
-        for hit in re.finditer(re.escape(name), line):
-            m = FIGURE.search(line, hit.end())
-            if m:
-                best = max(best, int(m.group(3)) if m.group(3) else (int(m.group(2)) - int(m.group(1))) * sign)
-    return best
+def mentions(name: str, line: str) -> list[re.Match]:
+    """Every whole-word mention of pin `name` in `line`: a longer pin name that ends with it does not count."""
+    return list(re.finditer(rf"(?<![\w-]){re.escape(name)}(?![\w-])", line))
+
+
+def dated_reason(line: str, name: str) -> bool:
+    """True when the declaration line carries a YYYY-MM-DD date and at least two words of reason beside the pin names and figures."""
+    if not DATE.search(line):
+        return False
+    rest = re.sub(r"[\w-]+(?=" + DECLARED.pattern + ")", " ", DATE.sub(" ", line))
+    return len(re.findall(r"[A-Za-z]{3,}", FIGURE.sub(" ", rest).replace(name, " "))) >= 2
+
+
+def declaration_verdict(r: str, body: str) -> str:
+    """Empty when the body's "Ratchets raised" section allows the raise `r`, else the reason it does not."""
+    key, old, _, new = r.rsplit(" ", 3)
+    name = key.rsplit(":", 1)[1]
+    lines = [(line, mentions(name, line)) for line in section(body, RATCHET_HEADING).splitlines()]
+    lines = [(line, hits) for line, hits in lines if hits]
+    if not lines:
+        return "the section does not name it"
+    step = None if new == "removed" else int(new) - int(old)
+    why = "no figure immediately after its name"
+    for line, hits in lines:
+        if step is None:
+            if dated_reason(line, name):
+                return ""
+            why = "needs a date (YYYY-MM-DD) and a reason on its line"
+            continue
+        for hit in hits:
+            m = DECLARED.match(line, hit.end())
+            if not m:
+                continue
+            if m.group(3):
+                size, ok = int(m.group(3)), int(m.group(3)) >= abs(step)
+                why = f"the section allows +{size}, the raise is {abs(step)}"
+            else:
+                a, b = int(m.group(1)), int(m.group(2))
+                ok = a == int(old) and ((b >= int(new)) if step > 0 else (b <= int(new)))
+                why = f"the section says {a} -> {b}, the measured raise is {old} -> {new} (write +N when the base moved)"
+            if ok and not dated_reason(line, name):
+                why, ok = "needs a date (YYYY-MM-DD) and a reason on its line", False
+            if ok:
+                return ""
+    return why
 
 
 def undeclared(raises: list[str], body: str) -> list[str]:
-    """Raised pins the body's "Ratchets raised" section does not allow: it names no figure, or its figure is smaller than the raise."""
-    out = []
-    for r in raises:
-        key, old, _, new = r.rsplit(" ", 3)
-        name = key.rsplit(":", 1)[1]
-        if new == "removed":
-            if name not in section(body, RATCHET_HEADING):
-                out.append(r)
-            continue
-        step = int(new) - int(old)
-        allowed = declared_amount(name, body, 1 if step > 0 else -1)
-        if allowed < abs(step):
-            out.append(f"{r} (the section allows {allowed}, the raise is {abs(step)})")
-    return out
+    """Raised pins the body's "Ratchets raised" section does not allow, each with the reason."""
+    return [f"{r} ({why})" for r in raises if (why := declaration_verdict(r, body))]
 
 
 def invariants_verdict(changed: list[str], body: str | None, root: Path = ROOT) -> tuple[str, str]:
@@ -405,7 +431,7 @@ def branch_rows(base: str, body: str | None, expiry: bool) -> list[tuple[str, st
     if not up:
         rows.append(("ratchets raised", "PASS", "none"))
     elif body is None:
-        rows.append(("ratchets raised", "DECLARE", "declare under 'Ratchets raised' in the PR body, each pin with its step (`name old -> new` or `name +N`): " + "; ".join(up)))
+        rows.append(("ratchets raised", "DECLARE", "declare under 'Ratchets raised' in the PR body, each pin with its step, a date and a reason (`name +N (YYYY-MM-DD): reason`, or `name old -> new` with old the base value): " + "; ".join(up)))
     else:
         missing = undeclared(up, body)
         rows.append(("ratchets raised", "FAIL" if missing else "PASS", ("not allowed by the PR body's 'Ratchets raised': " + "; ".join(missing)) if missing else "declared: " + "; ".join(up)))
@@ -701,19 +727,30 @@ def self_test() -> int:
     assert raised(base, {"f:silent": (39, False), "f:independent": (105, True), **keep}) == ["f:independent 106 -> 105"]
     assert raised(base, {"f:silent": (39, False), "f:independent": (106, True)}) == ["f:gone 1 -> removed"]
     up = ["tests/offline/s.rs:silent 39 -> 40"]
+    sec = lambda s: "## Ratchets raised\n" + s + "\n## Evidence\nsilent\n"
     assert len(undeclared(up, "## Why\nx\n")) == 1, "an undeclared raise must fail"
-    assert undeclared(up, "## Ratchets raised\n- silent 39 -> 40: why\n## Evidence\n") == []
+    assert undeclared(up, sec("- silent 39 -> 40 (2026-11-27): a sibling entry")) == []
     assert len(undeclared(up, "## Ratchets raised\nnone\n## Evidence\nsilent\n")) == 1, "a mention outside the section does not declare"
-    assert len(undeclared(up, "## Ratchets raised\n- silent: why\n")) == 1, "a name with no figure allows nothing"
-    assert undeclared(up, "## Ratchets raised\n- silent +1 (2026-11-27): why\n") == []
-    assert undeclared(up, "## Ratchets raised\n| silent | 38 \u2192 39 | why |\n") == [], "the step is allowed whatever the base it was written against"
-    assert len(undeclared(up, "## Ratchets raised\n- silent 39 -> 38: why\n")) == 1, "a step in the other direction allows nothing"
-    assert len(undeclared(["tests/offline/s.rs:silent 39 -> 41"], "## Ratchets raised\n- silent 39 -> 40: why\n")) == 1, "a raise of 2 over a declared 1 must fail"
-    assert undeclared(["tests/offline/s.rs:independent 106 -> 105"], "## Ratchets raised\n- independent 106 -> 105: why\n") == [], "a floor loosens downwards"
+    assert len(undeclared(up, sec("- silent: a sibling entry 2026-11-27"))) == 1, "a name with no figure allows nothing"
+    assert undeclared(up, sec("- silent +1 (2026-11-27): a sibling entry")) == []
+    assert undeclared(up, sec("| silent | 39 \u2192 40 | 2026-11-27 | a sibling entry |")) == []
+    assert len(undeclared(up, sec("- silent 39 -> 40: a sibling entry"))) == 1, "a declaration without a date must fail"
+    assert len(undeclared(up, sec("- silent +1 (2026-11-27)"))) == 1, "a declaration without a reason must fail"
+    assert len(undeclared(up, sec("- silent 40 -> 39 (2026-11-27): a sibling entry"))) == 1, "a step in the other direction allows nothing"
+    big = ["tests/offline/s.rs:silent 39 -> 41"]
+    assert len(undeclared(big, sec("- silent +1 (2026-11-27): a sibling entry"))) == 1, "a raise of 2 over a declared +1 must fail"
+    assert len(undeclared(big, sec("- silent 39 -> 40 (2026-11-27): a sibling entry"))) == 1, "a target below the measured value must fail"
+    assert undeclared(["tests/offline/s.rs:independent 106 -> 105"], sec("- independent 106 -> 105 (2026-11-27): a sibling entry")) == [], "a floor loosens downwards"
+    pre = ["tests/offline/s.rs:matrix-gaps 5 -> 6"]
+    assert len(undeclared(pre, sec("- perf-matrix-gaps +1 (2026-11-27): a sibling entry"))) == 1, "a longer pin name ending with this one does not declare it"
+    assert len(undeclared(pre, sec("- matrix-gaps: a sibling entry 2026-11-27; other-pin 5 -> 9"))) == 1, "a neighbour pin's figure does not declare this one"
+    assert len(undeclared(pre, sec("- matrix-gaps grew because 5 -> 9 files moved (2026-11-27)"))) == 1, "a figure in an ordinary sentence does not declare"
+    assert len(undeclared(["tests/offline/s.rs:matrix-gaps 33 -> 34"], sec("- matrix-gaps 10 -> 34 (2026-11-27): a stale old number"))) == 1, "an old figure that is not the base must fail"
     two = ["f:a 1 -> 3", "f:b 5 -> 6"]
-    assert undeclared(two, "## Ratchets raised\n- a 1 -> 3; b 5 -> 6: why\n") == [], "each pin takes the step written after its own name"
-    assert len(undeclared(two, "## Ratchets raised\n- a 1 -> 2; b 5 -> 6: why\n")) == 1, "a neighbour's larger step does not allow a pin more"
-    assert undeclared(["f:gone 1 -> removed"], "## Ratchets raised\n- gone: moved\n") == []
+    assert undeclared(two, sec("- a +2; b +1 (2026-11-27): one shared reason")) == [], "each pin takes the step written after its own name"
+    assert len(undeclared(two, sec("- a +1; b +1 (2026-11-27): one shared reason"))) == 1, "a neighbour's larger step does not allow a pin more"
+    assert undeclared(["f:gone 1 -> removed"], sec("- gone (2026-11-27): moved to another guard")) == []
+    assert len(undeclared(["f:gone 1 -> removed"], sec("- gone: moved"))) == 1, "a removal needs a dated reason too"
     assert rows_holding("# h\n  - id: a\n    x: { gap: 1 }\n    y: { gap: 2 }\n  - id: b\n    z: 1\n  - id: c\n    contradicted_by:\n", "^  - id:", "gap:|contradicted_by:") == 2
     assert PIN_NAME.match("const NO_ORACLE_CEILING: usize = 21;") and PIN_NAME.match("gap_ratchet: 2")
     assert PIN_NAME.match("const BASELINE: &[(&str, usize)] = &[") and PIN_NAME.match("CONN_CEILING = {")
