@@ -39,9 +39,12 @@ pub(super) fn is_null_cell(c: &ColumnData<'_>) -> bool {
     )
 }
 
-/// A column whose values have no lossless Arrow type and ride as text: `sql_variant` and CLR UDTs.
+/// A column whose values have no lossless Arrow type and ride as text: `sql_variant`, CLR UDTs and `xml`.
 pub(crate) fn renders_as_text(ct: ColumnType) -> bool {
-    matches!(ct, ColumnType::SSVariant | ColumnType::Udt)
+    matches!(
+        ct,
+        ColumnType::SSVariant | ColumnType::Udt | ColumnType::Xml
+    )
 }
 
 /// Whether a batch cell of wire type `ct` read into a `Utf8` field is the server's text of the value: `sql_variant`, a CLR UDT, or a date-time type declared `text`.
@@ -221,10 +224,20 @@ fn mssql_engine_type(ct: ColumnType) -> RivetType {
             scale: 4,
         },
         ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
-        other => RivetType::Unsupported {
-            native_type: format!("{other:?}").to_lowercase(),
-            reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
-        },
+        ColumnType::Xml => seeded!(
+            "mssql-xml-refused",
+            no_mapping(ColumnType::Xml),
+            RivetType::String
+        ),
+        other => no_mapping(other),
+    }
+}
+
+/// The `Unsupported` type of a wire type this engine does not map.
+fn no_mapping(ct: ColumnType) -> RivetType {
+    RivetType::Unsupported {
+        native_type: format!("{ct:?}").to_lowercase(),
+        reason: format!("SQL Server column type {ct:?} has no Rivet mapping yet"),
     }
 }
 
@@ -1236,7 +1249,7 @@ mod type_map_tests {
             (ColumnType::Guid, Some(Uuid), RivetType::Uuid),
             (ColumnType::SSVariant, None, RivetType::String),
             (ColumnType::Udt, None, RivetType::String),
-            (ColumnType::Xml, None, unsupported("xml", ColumnType::Xml)),
+            (ColumnType::Xml, None, RivetType::String),
         ]
     }
 
@@ -1441,14 +1454,32 @@ mod tests {
         );
     }
 
-    /// Only sql_variant and CLR UDT columns ride as text; a native text or int column does not.
+    /// Only sql_variant, CLR UDT and xml columns ride as text; a native text or int column does not.
     #[test]
-    fn only_variant_and_udt_columns_render_as_text() {
+    fn only_variant_udt_and_xml_columns_render_as_text() {
         use tiberius::ColumnType as T;
         assert!(renders_as_text(T::SSVariant));
         assert!(renders_as_text(T::Udt));
+        assert!(renders_as_text(T::Xml));
         assert!(!renders_as_text(T::NVarchar));
         assert!(!renders_as_text(T::Int4));
+    }
+
+    /// An `xml` cell renders as its own text byte for byte: entities, quotes, non-ASCII and astral characters survive, SQL NULL is `None`.
+    #[test]
+    fn an_xml_cell_renders_as_its_own_text() {
+        for text in [
+            "<a/>",
+            "<r a=\"1\" b='x\"y'><c>h\u{e9}llo \u{2713} \u{1F600}</c></r>",
+            "<t>&lt;&amp;&gt;&quot;</t>",
+            "<a/><b>two</b>",
+        ] {
+            let cell = ColumnData::Xml(Some(std::borrow::Cow::Owned(tiberius::xml::XmlData::new(
+                text,
+            ))));
+            assert_eq!(cell_text(&cell).as_deref(), Some(text));
+        }
+        assert_eq!(cell_text(&ColumnData::Xml(None)), None);
     }
 
     /// Every base type a `sql_variant` or UDT can carry renders as SQL Server's own ISO text.

@@ -220,7 +220,7 @@ fn table() -> Vec<Case> {
         case(
             "xml",
             of(ColumnType::Xml, None),
-            "unsupported(xml) | - | unsupported | unsupported | reads bool,int16,int32,int64,uint64,float32,float64,decimal(18,2),decimal(50,2),date,time(microsecond),timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,binary,json,uuid,enum,interval,list<int32>,unsupported(x)",
+            "string | Utf8 | native | exact | reads string,json,uuid",
         ),
         case(
             "decimaln(18,2) (catalog hint)",

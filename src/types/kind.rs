@@ -131,6 +131,11 @@ const ENGINE_ONLY_IN_COMMON_SHAPE: &[(super::override_table::Engine, &str, &str)
             "udt",
             "2026-11-21: CLR type, serialized bytes as text",
         ),
+        (
+            Mssql,
+            "xml",
+            "2026-11-25: xml, the server's own text as text",
+        ),
     ]
 };
 

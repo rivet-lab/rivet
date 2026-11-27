@@ -2518,34 +2518,6 @@ fn mssql_checkpoint_follows_a_failover_to_the_secondary() {
     );
 }
 
-/// A captured `xml` value has no CDC decoder: the run refuses instead of writing it as NULL.
-#[test]
-#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
-fn mssql_cdc_refuses_a_captured_value_it_cannot_decode() {
-    let _serial = cross_process_serial("mssql_cdc");
-    let d = tempfile::tempdir().unwrap();
-    let table = unique_name("rivet_cdc_xml");
-    let ci = format!("dbo_{table}");
-    mssql_cdc_drop_table(&format!("dbo.{table}"));
-    mssql_cdc_exec(&format!(
-        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, doc XML)"
-    ));
-    enable_cdc(&table, &ci);
-    let _guard = MssqlCdcTable {
-        table: table.clone(),
-        ci: ci.clone(),
-    };
-    mssql_cdc_exec(&format!("INSERT INTO dbo.{table} VALUES (1, '<a/>')"));
-    wait_for_capture(&ci, 1);
-    let out = d.path().join("out");
-    std::fs::create_dir_all(&out).unwrap();
-    let said = mssql_cdc_rig(&table, &ci, &d.path().join("cdc.ckpt"), &out).run_expect_fail();
-    assert!(
-        said.contains("no decoder for a captured Xml"),
-        "a valued xml cell must refuse the run, not land as NULL: {said}"
-    );
-}
-
 /// A snapshot-baselined SQL Server scenario with ids 1..=3 delivered and two updates waiting unread.
 fn baselined_with_two_unread_updates(label: &str, shape: fn(Rig) -> Rig) -> CdcScenario {
     let mut s = CdcScenario::mssql_with(label, "id INT PRIMARY KEY, v INT", |r, _| {
