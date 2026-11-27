@@ -2,37 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-// Oracle opt-outs in tests/live. History frozen at 2026-11-04; a later raise is declared in its PR body.
-// 17 -> 21 (2026-10-02): live_cdc_source_connections counts source connections, which the oracle's own read would add to.
-// 21 -> 22 (2026-10-03): the PG truncate refusal's resumed run keeps the pre-truncate rows the refusal says only a re-snapshot removes.
-// 22 -> 23 (2026-10-03): pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split merges by a declared `load.pk: [code]`; the oracle dedups by the source primary key `id`.
-// Raised 23 -> 24 (2026-10-08): the MongoDB oplog-gone cells run on a replica set container they start themselves, which the reader inside rivet-duckdb cannot reach.
-// 24 -> 21 (2026-10-15): the oracle reads a mixed-type MongoDB `_id` (pymongo, canonical extended JSON), so the three heterogeneous-`_id` full scans are graded.
-// 21 -> 22 (2026-10-21, #675): a bare MySQL CDC name only another database holds; the oracle reads the bare name in the connection database, so the cell reads the parts itself.
-// 22 -> 26 (2026-10-29, #719): column-grants cells the oracle cannot grade (a bare name another database holds, the generated invisible key, a DDL in the backlog, the grant changed between two reads); closes when the oracle reads the account's columns.
-// 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
-// 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
-// 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
-// 29 -> 30 (2026-11-03, #798): the ClickHouse cell a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql loads beside a live MySQL CDC run, which the oracle cannot grade against the source mid-run; it reads the current-state view through the second client; closes when the oracle grades a load taken during a CDC run.
-// 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
-// 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
-// 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
-// 31 -> 32 (2026-11-06, #852): the SQL Server in-range nanosecond cell delivers 100 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
-// 32 -> 33 (2026-11-08): the declared-override cells (live_int_to_float_override.rs) read the parquet back themselves, one shared `readback_only` opt-out; closes when the oracle grades a column the config declares a type for.
-// 33 -> 34 (2026-11-11): the datetime2(7) key-admission cell holds rows that differ below a microsecond, which the oracle reads the source at; the view is read back by the second client; closes when the oracle reads datetime2(7) at full scale.
-// 34 -> 35 (2026-11-11): the Oracle TIMESTAMP(9) key-admission cell holds rows that differ below a microsecond and reads the view through the second client; closes when the oracle reads a timestamp_ns column at full scale.
-// 35 -> 36 (2026-11-11): the unkeyed Mongo CDC cell of mixed `_id` types delivers the flat `_id` text the warning documents, so int 1 and string "1" collapse in the oracle's grade; closes when a keyed load of mixed `_id` is typed (#926).
-// 36 -> 37 (2026-11-12): a_missing_base_refuses_the_compaction_and_keeps_the_buffer drops its base table on purpose and the warehouse grade fails an absent table under source rows; closes when the grade reads a declared drop.
-// 37 -> 38 (2026-11-16, #715): the MongoDB view-account batch cell reads the base collection through an account the server refuses; closes when the oracle reads a collection through the view the account is granted.
-// 38 -> 39 (2026-11-18, #712): the PostgreSQL column-grants cells run as an account that may not SELECT the hidden column, which the oracle reads the source with; one shared helper, the cells grade the delivery against the values they seeded; closes when the oracle reads the account's columns.
-// 46 -> 47 (2026-11-19, #1083): the SQL Server CDC cell keyed on a datetime2(7) column the export declares `timestamp` delivers microseconds the oracle reads the source above; closes when the oracle grades a declared lossy override.
-// 47 -> 48 (2026-11-20): the PostgreSQL json/jsonb/interval/oid/enum array cell delivers INTERVAL[] as ISO text that no ledger delivery row pins; closes when the type ledger carries a delivery row for it.
-// 48 -> 49 (2026-11-21): the Oracle float64-override infinity cell reads a FLOAT(10) through a declared `float64` column whose own rendering is its subject; closes when the type ledger carries a delivery row for the override.
-// 50 -> 51 (2026-11-21, #1144): the PostgreSQL enum-array live cells read every list element back from the delivered Parquet and grade it against their own element checks; the rig oracle reads the source side as PostgreSQL text. Closes when the rig oracle grades a list column against source text.
-// 51 -> 55 (2026-11-22, #1125): the keyset skew and hot-first cells count source reads, rows per range and key pairs themselves against the fixture they built; the rig oracle's own read-back would be counted. Closes when the rig oracle can run beside a source-read counter.
-// 55 -> 57 (2026-11-22, #1162): the MySQL zero-datetime and Oracle Julian-date open-defect cells deliver a text the oracle's own source read cannot represent (NULL for a zero datetime, a sign-spaced text for a Julian date); closes when the oracle reads both as the server prints them.
-// 57 -> 58 (2026-11-22): the Oracle CDC cell for an LTZ value stored outside Oracle's own range reads that source through the oracle, whose own read fails with ORA-01877; one shared closure for the stream and snapshot legs; closes when the oracle reads a stored value Oracle cannot print.
-// 58 -> 59 (2026-11-22): the Oracle cell for a real LTZ instant just past 9999 compares the delivered value with the TZ column holding the same literal; the oracle's own source read of year 10000 fails with ORA-01841; closes when the oracle reads a stored value Oracle cannot convert.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
@@ -61,6 +30,7 @@ use std::path::{Path, PathBuf};
 // 59 -> 60 (2026-11-19, #918): the pending-baseline cells of check_override_wire_cdc.rs: the run refused by the baseline leg leaves its observed schema and a chunk checkpoint, asserted through one shared helper.
 // 60 -> 61 (2026-11-22, #1163): the added-column cells of live_pg_server_text.rs run on_schema_drift: fail, whose gate fails the run after its parts are written; one shared declaration in the helper, closed when the drift gate stops failing after the write.
 // 61 -> 62 (2026-11-22, #1148): the Oracle chunked cell refused on its fifth chunk (a_chunked_run_refused_on_a_later_chunk_*): the four finished chunks keep their parts, file_log rows and observed schema by design, and the cell asserts them.
+// 62 -> 63 (2026-11-23): the refused-run baseline cells of live_schema_drift.rs (a_refused_*_run_leaves_the_stored_baseline_as_it_found_it_*): the quality gate judges the parts after they are written, one shared declaration in the helper; closed when the gate refuses before the write.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
@@ -312,11 +282,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
         "pg_duplicate_run",
         "a failed run left: resume-point",
         "known defect: a checkpointed run its quality gate fails is recorded in export_progression",
-    ),
-    (
-        "a_change_older_than_an_alter_is_refused_by_code_oracle",
-        "a failed run left: resume-point",
-        "known defect: a run refused for an undecodable change has already replaced the export's drift baseline in export_schema",
     ),
 ]; // ratchet-pin: end
 

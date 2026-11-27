@@ -125,6 +125,9 @@ def _pg_counters(url: str) -> dict[str, int] | None:
     return dict(zip(("pg_tup_returned", "pg_tup_fetched", "pg_temp_files"), map(int, vals[-3:])))
 
 
+PLAN_CACHE_HARM = "mssql_logical_reads"
+
+
 def _mssql_reads(url: str, own: str) -> dict[str, int] | None:
     """Logical reads of each cached statement whose text names `own`, keyed by plan and offset; None when the DMV did not answer."""
     from .cdc import _sqlcmd
@@ -175,7 +178,7 @@ def measured_harm(probe: str, before: dict[str, int] | None, after: dict[str, in
         return None
     if probe.startswith("mssql"):
         grown = (v - before.get(k, 0) if v >= before.get(k, 0) else v for k, v in after.items())
-        return reported | {"mssql_logical_reads": sum(grown)}
+        return reported | {PLAN_CACHE_HARM: sum(grown)}
     return {k: after[k] - before[k] for k in after}
 
 
@@ -207,15 +210,15 @@ def _ran(s: Sample | None) -> bool:
 
 
 def _best(samples: list[Sample]) -> Sample | None:
-    """The per-metric minimum over successful samples; the first failed sample (with its `why`) when any run failed, None when there are none."""
+    """The per-metric minimum over successful samples, the median for the plan-cache metric; the first failed sample (with its `why`) when any run failed, None when there are none."""
     if not samples:
         return None
     if not all(s.ok for s in samples):
         return next(s for s in samples if not s.ok)
     keys = set.intersection(*(set(s.harm) for s in samples)) if samples else set()
+    harm = {k: (statistics.median_low if k == PLAN_CACHE_HARM else min)(s.harm[k] for s in samples) for k in keys}
     return Sample(True, min(s.wall for s in samples), min(s.cpu for s in samples),
-                  min(s.rss for s in samples), {k: min(s.harm[k] for s in samples) for k in keys},
-                  statistics.median(s.wall for s in samples))
+                  min(s.rss for s in samples), harm, statistics.median(s.wall for s in samples))
 
 
 def perf_verdict(engine: str, prev: Sample, cur: Sample) -> list[str]:
@@ -521,7 +524,7 @@ def _off_happy_path(led: Ledger, prev: Path, root: Path) -> None:
 
 def _cdc_changes(engine: str, url: str, lo: int) -> None:
     """CDC_CHANGES changes from id `lo`: one big transaction of inserts, then updates and deletes."""
-    from .cdc import _mongosh, _mssql_max_lsn, _mysql, _psql, _sqlcmd, _wait_mssql_captured
+    from .cdc import _mongosh, _mysql, _psql, _sqlcmd, _wait_mssql_captured
 
     hi = lo + CDC_CHANGES - 1
     if engine == "postgres":
@@ -536,13 +539,12 @@ def _cdc_changes(engine: str, url: str, lo: int) -> None:
                      f"UPDATE orc_cdc_probe SET amount = amount + 1 WHERE id BETWEEN {lo} AND {hi} AND id % 10 = 0; "
                      f"DELETE FROM orc_cdc_probe WHERE id BETWEEN {lo} AND {hi} AND id % 17 = 0;"))
     elif engine == "mssql":
-        before = _mssql_max_lsn(url)
         _sqlcmd(url, sql=(f"INSERT INTO dbo.orc_cdc_probe SELECT n, n, CONCAT('{{\"k\":', n, '}}') FROM "
                           f"(SELECT TOP ({CDC_CHANGES}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + {lo - 1} AS n "
                           "FROM sys.all_objects a CROSS JOIN sys.all_objects b) q;\n"
                           f"UPDATE dbo.orc_cdc_probe SET amount = amount + 1 WHERE id BETWEEN {lo} AND {hi} AND id % 10 = 0;\n"
                           f"DELETE FROM dbo.orc_cdc_probe WHERE id BETWEEN {lo} AND {hi} AND id % 17 = 0;\n"))
-        _wait_mssql_captured(url, before)
+        _wait_mssql_captured(url, "dbo_orc_cdc_probe", "delete", hi - hi % 17)
     else:
         _mongosh(url, (f"db.orc_cdc_probe.insertMany(Array.from({{length: {CDC_CHANGES}}}, "
                        f"(_, i) => ({{_id: {lo} + i, amount: i, meta: {{k: i}}}}))); "

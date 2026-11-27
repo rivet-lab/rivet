@@ -1210,14 +1210,7 @@ fn empty_run_delivery(eng: Eng, table: &str, lines: &[&str]) -> EmptyRun {
     );
     let mut files: Vec<String> = files_under(&rig.out_dir())
         .iter()
-        .map(|p| {
-            p.strip_prefix(rig.out_dir())
-                .unwrap()
-                .to_string_lossy()
-                .chars()
-                .map(|c| if c.is_ascii_digit() { '#' } else { c })
-                .collect()
-        })
+        .map(|p| mask_digit_runs(&p.strip_prefix(rig.out_dir()).unwrap().to_string_lossy()))
         .collect();
     files.sort();
     let metrics =
@@ -2956,7 +2949,7 @@ fn stand_pool_split_keyset_recovers_a_crash_postgres() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -2973,7 +2966,7 @@ fn stand_pool_split_keyset_rerun_without_resume_after_a_crash_postgres() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
         false,
     );
 }
@@ -2989,7 +2982,7 @@ fn stand_pool_split_keyset_recovers_a_crash_mysql() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -3004,7 +2997,7 @@ fn stand_pool_split_keyset_recovers_a_crash_mssql() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -3428,7 +3421,7 @@ mod oracle_cells {
             &dense_ids(300_000),
             Some((300_001, 450_000)),
             "chunk_by_key: ID",
-            ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+            ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
         );
     }
 }

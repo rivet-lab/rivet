@@ -140,9 +140,8 @@ def sql(engine: str, url: str, stmt: str) -> core.Proc:
     return p
 
 
-def exec_all(engine: str, url: str, stmts: list[str], image: str = "") -> None:
-    """Run statements on the source; SQL Server waits for its capture job; raises on the first refusal."""
-    before = cdc._mssql_max_lsn(url) if engine == "mssql" else ""
+def exec_all(engine: str, url: str, stmts: list[str], image: str = "", leg: str = "", t: str = "", n: int = 0) -> None:
+    """Run statements on the source; SQL Server then waits for the change row of the last write of `leg`; raises on the first refusal."""
     if engine == "mysql" and image:
         p = sql(engine, url, f"SET SESSION binlog_row_image = {image}; " + " ".join(s + ";" for s in stmts))
         if not p.ok:
@@ -152,8 +151,10 @@ def exec_all(engine: str, url: str, stmts: list[str], image: str = "") -> None:
             p = sql(engine, url, s + ";")
             if not p.ok:
                 raise RuntimeError(f"{engine} refused `{s[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
-    if engine == "mssql":
-        cdc._wait_mssql_captured(url, before)
+    if engine == "mssql" and leg:
+        op, row_id, _ = expected(leg, n)[-1]
+        if not cdc._wait_mssql_captured(url, f"dbo_{t}", op, row_id):
+            raise RuntimeError(f"the capture job did not harvest the {leg} leg's last change ({op} id={row_id})")
 
 
 def capture_on(engine: str, url: str, t: str) -> list[str]:
@@ -294,7 +295,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
             if missing:
                 out.append(Result(cell, DELIVERED, EMPTY, f"{len(missing)} of {len(exp)} change rows not delivered, e.g. {missing[:3]}"))
                 continue
-            nulled, wrong = [], []
+            nulled, wrong, wrong_lits = [], [], []
             run = leg_run(leg)
             zeros = 0
             for op, i, k in exp:
@@ -305,13 +306,14 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
                     nulled.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}")
                 elif v == WRONG:
                     wrong.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}->{seen[(op, i)].get(key)!r}")
+                    wrong_lits.append(lit(c, k))
             if zeros:
                 total = zero_nulls_by_run(engine, c, u, n, seen)[run]
                 if unwarned := nsn.zero_date_unwarned(total, nsn.warned_counts(p.out).get(key, 0)):
                     nulled.append(unwarned)
             if nulled:
                 out.append(Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fid))
-            elif wrong and fid in ("lossy", "logical_string", "unsupported"):
+            elif wrong and nsn.excused_by_fidelity(engine, wrong_lits, fid):
                 out.append(Result(cell, nsn.DECLARED, "", f"{len(wrong)} values changed under fidelity {fid}", fidelity=fid))
             elif wrong:
                 out.append(Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fid or '?'}, e.g. {wrong[:3]}", fidelity=fid))
@@ -358,10 +360,10 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
 
     try:
         each("snapshot")
-        exec_all(engine, dml_url, dml(engine, cols, t, n), image)
+        exec_all(engine, dml_url, dml(engine, cols, t, n), image, "delete", t, n)
         each("stream")
         for kind in ddl_kinds():
-            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image)
+            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image, kind, t, n)
             each(kind)
     except RuntimeError as e:
         note = f"the round's source DML was refused: {e}"[:300]
@@ -556,6 +558,23 @@ def self_test() -> None:
     finally:
         globals()["run_round"] = saved_round
     assert asked == [(7, ["e00"], [none, units[1]]), (8, ["e01"], [none, units[2]])] and [x.cell for x in solo] == ["e00", "e01"], asked
+    waits, real_wait, real_sql = [], cdc._wait_mssql_captured, globals()["sql"]
+    cdc._wait_mssql_captured = lambda url, ci, op, row_id: waits.append((ci, op, row_id)) or bool(row_id != 2002)
+    globals()["sql"] = lambda *_a, **_k: nsn._proc(0)
+    try:
+        exec_all("mssql", "u", ["x"], "", "removed", "t", 3)
+        exec_all("mssql", "u", ["x"], "", "delete", "t", 3)
+        exec_all("mssql", "u", ["x"])
+        exec_all("postgres", "u", ["x"], "", "removed", "t", 3)
+        assert waits == [("dbo_t", "insert", 2003), ("dbo_t", "delete", 3)], f"a leg waits for the change row of its last write: {waits}"
+        try:
+            exec_all("mssql", "u", ["x"], "", "type_changed", "t", 3)
+        except RuntimeError as e:
+            assert "type_changed" in str(e), e
+        else:
+            raise AssertionError("a change row that never lands is a refusal, not a graded run")
+    finally:
+        cdc._wait_mssql_captured, globals()["sql"] = real_wait, real_sql
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 

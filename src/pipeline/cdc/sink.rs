@@ -767,7 +767,11 @@ fn column_cells(
     fix: Option<&value::MysqlCellFix>,
     (schema_names, memo): (&[&str], NameMemo),
 ) -> std::result::Result<Option<Vec<Option<RivetValue>>>, value::CellRefusal> {
-    if fix.is_none() && !value::prints_stamp_text(engine, &m.source_native_type, dt) {
+    let iso = value::iso_nanos_zone(m);
+    if fix.is_none()
+        && iso.is_none()
+        && !value::prints_stamp_text(engine, &m.source_native_type, dt)
+    {
         return Ok(None);
     }
     events
@@ -782,7 +786,10 @@ fn column_cells(
                             .map_err(|r| value::CellRefusal::refused(row, v, r))?,
                         None => v.clone(),
                     };
-                    Ok(value::stamp_text(engine, dt, fixed))
+                    Ok(match iso {
+                        Some(zoned) => value::stamp_iso_nanos(zoned, fixed),
+                        None => value::stamp_text(engine, dt, fixed),
+                    })
                 })
                 .transpose()
         })
@@ -839,7 +846,7 @@ fn flush(
             seeded!(
                 "mysql-cdc-time-remedy-names-the-batch-cast",
                 true,
-                f.applies_to(dt)
+                f.applies_to(dt, &m.delivery)
             )
         });
         let memo = image_name_memo(events, &m.column_name);
@@ -1634,6 +1641,70 @@ mod tests {
             before_names: None,
             before_poison: None,
             image_labels: None,
+        }
+    }
+
+    /// A column delivered as `iso_timestamp_nanos` text stores the batch text of the value, `Z` only for a zoned native type, whatever the year.
+    #[test]
+    fn column_cells_prints_an_iso_nanos_column_as_the_batch_prints_it() {
+        use crate::types::{Delivery, RivetType, TextForm, TypeFidelity, TypeMapping};
+        use arrow::datatypes::DataType;
+        let at = |y, ns| {
+            chrono::NaiveDate::from_ymd_opt(y, 2, 28)
+                .and_then(|d| d.and_hms_nano_opt(13, 14, 15, ns))
+                .expect("stamp")
+        };
+        let col = |native: &str| TypeMapping {
+            column_name: "v".into(),
+            source_native_type: native.into(),
+            rivet_type: RivetType::Int64,
+            arrow_type: Some(DataType::Utf8),
+            fidelity: TypeFidelity::LogicalString,
+            nullable: true,
+            warnings: vec![],
+            delivery: Delivery::Text(TextForm::IsoTimestampNanos),
+            refusal: None,
+        };
+        for (native, year, ns, want) in [
+            (
+                "timestamp(9)",
+                2024,
+                123_456_789,
+                "2024-02-28T13:14:15.123456789",
+            ),
+            ("timestamp(7)", 1500, 100, "1500-02-28T13:14:15.000000100"),
+            ("timestamp(9)", 2500, 1, "2500-02-28T13:14:15.000000001"),
+            (
+                "timestamp_tz(9)",
+                2262,
+                999_999_999,
+                "2262-02-28T13:14:15.999999999Z",
+            ),
+            (
+                "timestamp_ltz(9)",
+                1677,
+                5,
+                "1677-02-28T13:14:15.000000005Z",
+            ),
+        ] {
+            let events = [ChangeEvent {
+                after: Some(vec![RivetValue::DateTime(at(year, ns))]),
+                image_names: Some(std::sync::Arc::from(vec!["v".to_string()])),
+                ..insert(0)
+            }];
+            let cells = column_cells(
+                &events,
+                (0, &col(native)),
+                (CdcEngine::Oracle, &DataType::Utf8),
+                None,
+                (&["v"], None),
+            )
+            .expect("no refusal");
+            assert_eq!(
+                cells,
+                Some(vec![Some(RivetValue::Bytes(want.as_bytes().to_vec()))]),
+                "{native} {year}"
+            );
         }
     }
 

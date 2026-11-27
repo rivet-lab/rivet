@@ -58,7 +58,6 @@ const LONG_FUNCTION_LINES: usize = 150;
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
     ("src/error/retry.rs::classify_error#1", 206),
-    ("src/format/csv.rs::write_csv_value#1", 165),
     ("src/init/yaml_scaffold.rs::export_block_lines#1", 243),
     ("src/load/orchestrate.rs::load_incremental_job#1", 163),
     ("src/load/orchestrate.rs::load_one_cdc_base#1", 155),
@@ -84,8 +83,8 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         199,
     ),
     ("src/pipeline/cli.rs::show_journal#1", 156),
-    ("src/pipeline/finalize.rs::write_run_manifest#1", 182),
-    ("src/pipeline/job.rs::execute_resolved_plan#1", 260),
+    ("src/pipeline/finalize.rs::write_run_manifest#1", 181),
+    ("src/pipeline/job.rs::execute_resolved_plan#1", 244),
     ("src/pipeline/job.rs::run_export_job_inner#1", 230),
     ("src/pipeline/keyset.rs::run_keyset#1", 200),
     ("src/pipeline/keyset.rs::run_keyset_parallel#1", 330),

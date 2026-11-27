@@ -283,6 +283,12 @@ def self_test() -> None:
     assert observe("mysql", col, "1", 2, exact).kind == te.FORM and observe("mysql", col, "NULL", [], exact) == form("[]")
     assert observe("mysql", col, "NULL", None, exact) == exact
     assert observe("mysql", col, "ARRAY[1]", [1], exact).kind == PRESENT
+    real, nsn.server_geometry = nsn.server_geometry, lambda lit: nsn.POINT_ORIGIN
+    try:
+        geo, wkb = "ST_GeomFromText('POINT(0 0)')", bytes(nsn.POINT_ORIGIN[nsn.SRID_BYTES:]).hex()
+        assert klass(exact, observe("mysql", col, geo, wkb, exact)) == "" and klass(exact, observe("mysql", col, geo, "garbage", exact)) == nsn.WRONG
+    finally:
+        nsn.server_geometry = real
     assert cell_name("mysql", col, "x" * 50, "duck") == "mysql/INT[" + "x" * 40 + "~50]->duck"
     cols = columns("mysql")
     assert cols and all(c.lits for c in cols if not c.whole), "a ledger row seeds at least one value"

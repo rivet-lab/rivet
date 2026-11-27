@@ -9,9 +9,9 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
 | postgres | 77 | 26 | 4 | 0 |
-| mysql | 37 | 43 | 0 | 0 |
+| mysql | 45 | 37 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
-| oracle | 15 | 42 | 1 | 0 |
+| oracle | 17 | 40 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
 No cell is empty.
@@ -135,7 +135,15 @@ No cell is empty.
 | mysql | `TIME(3)` | `time_beyond_day` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `TIME(5)` | `time_beyond_day` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `ENUM('a\\b','l\nf','c\rr','n\0l','😀','x\\y')` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| mysql | 43 matrix-only rows: `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `MEDIUMINT UNSIGNED`, `BIGINT`, `TINYINT(1) UNSIGNED`, `BIT(2)`, `BIT(16)`, `BIT(32)`, `BIT(63)`, `DECIMAL(1,0)`, `DECIMAL(10,2)`, `DECIMAL(10,2) UNSIGNED`, `DECIMAL(38,0)`, `DECIMAL(38,8)`, `DECIMAL(38,30)`, `DECIMAL(30,30)`, `DECIMAL(39,0)`, `DECIMAL(65,0)`, `DECIMAL(65,30)`, `FLOAT UNSIGNED`, `DOUBLE UNSIGNED`, `FLOAT(10,2)`, `DOUBLE(20,5)`, `CHAR(10)`, `VARCHAR(255)`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `VARBINARY(255)`, `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `DATETIME`, `DATETIME(3)`, `TIMESTAMP(0) NULL`, `TIMESTAMP(3) NULL`, `TIME`, `GEOMETRY`, `POINT`, `LINESTRING`, `POLYGON`, `GEOMETRYCOLLECTION`, `MULTIPOINT` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| mysql | `GEOMETRY` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `POINT` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `LINESTRING` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `POLYGON` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `GEOMETRYCOLLECTION` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTIPOINT` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTILINESTRING` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | `MULTIPOLYGON` | `hex_wkb` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mysql | 37 matrix-only rows: `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `MEDIUMINT UNSIGNED`, `BIGINT`, `TINYINT(1) UNSIGNED`, `BIT(2)`, `BIT(16)`, `BIT(32)`, `BIT(63)`, `DECIMAL(1,0)`, `DECIMAL(10,2)`, `DECIMAL(10,2) UNSIGNED`, `DECIMAL(38,0)`, `DECIMAL(38,8)`, `DECIMAL(38,30)`, `DECIMAL(30,30)`, `DECIMAL(39,0)`, `DECIMAL(65,0)`, `DECIMAL(65,30)`, `FLOAT UNSIGNED`, `DOUBLE UNSIGNED`, `FLOAT(10,2)`, `DOUBLE(20,5)`, `CHAR(10)`, `VARCHAR(255)`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `VARBINARY(255)`, `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `DATETIME`, `DATETIME(3)`, `TIMESTAMP(0) NULL`, `TIMESTAMP(3) NULL`, `TIME` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | mssql | `BIGINT` | `Int64` | `exact` | `Nullable(Int64)` | `INT64` | `NUMBER(38,0)` |
 | mssql | `DECIMAL(18,4)` | `Decimal128(18, 4)` | `exact` | `Nullable(Decimal(18, 4))` | `NUMERIC` | `NUMBER(18,4)` |
 | mssql | `BIT` | `Boolean` | `exact` | `Nullable(Bool)` | `BOOL` | `BOOLEAN` |
@@ -166,14 +174,16 @@ No cell is empty.
 | oracle | `BINARY_DOUBLE` | `Float64` | `exact` | `Nullable(Float64)` | `FLOAT64` | `FLOAT` |
 | oracle | `DATE` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
 | oracle | `TIMESTAMP(6)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
-| oracle | `TIMESTAMP(9)` | `Timestamp(ns)`; today `Timestamp(µs)` (defect) | `exact` | `Nullable(DateTime64(9, 'UTC'))`; today `Nullable(DateTime64(6, 'UTC'))` (defect) | `INT64`; today `DATETIME` (defect) | `TIMESTAMP_NTZ`; today `TIMESTAMP_NTZ` (defect) |
+| oracle | `TIMESTAMP(9)` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `TIMESTAMP(6) WITH TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `TIMESTAMP(6) WITH LOCAL TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `VARCHAR2(100 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `NVARCHAR2(50)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `CHAR(5 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `RAW(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
-| oracle | 42 matrix-only rows: `FLOAT`, `FLOAT(10)`, `NUMBER(38,0)`, `NUMBER(10,-3)`, `NUMBER(10,2)`, `NUMBER(5,7)`, `NUMBER(18,0)`, `NUMBER(19,0)`, `INTEGER`, `SMALLINT`, `DECIMAL(20,5)`, `NUMBER(38,38)`, `CHAR(10)`, `CHAR(2000)`, `VARCHAR2(4000)`, `VARCHAR2(10 CHAR)`, `NCHAR(10)`, `NVARCHAR2(2000)`, `CLOB`, `NCLOB`, `BLOB`, `RAW(2000)`, `LONG`, `LONG RAW`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `TIMESTAMP(0) WITH TIME ZONE`, `TIMESTAMP(9) WITH TIME ZONE`, `TIMESTAMP(0) WITH LOCAL TIME ZONE`, `TIMESTAMP(9) WITH LOCAL TIME ZONE`, `INTERVAL YEAR(9) TO MONTH`, `INTERVAL YEAR(2) TO MONTH`, `INTERVAL DAY(9) TO SECOND(9)`, `INTERVAL DAY(2) TO SECOND(0)`, `ROWID`, `UROWID(4000)`, `JSON`, `XMLTYPE`, `BOOLEAN`, `VECTOR(3, FLOAT32)`, `VECTOR(2, FLOAT64)`, `VECTOR(2, INT8)` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| oracle | `TIMESTAMP(9) WITH TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `TIMESTAMP(9) WITH LOCAL TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | 40 matrix-only rows: `FLOAT`, `FLOAT(10)`, `NUMBER(38,0)`, `NUMBER(10,-3)`, `NUMBER(10,2)`, `NUMBER(5,7)`, `NUMBER(18,0)`, `NUMBER(19,0)`, `INTEGER`, `SMALLINT`, `DECIMAL(20,5)`, `NUMBER(38,38)`, `CHAR(10)`, `CHAR(2000)`, `VARCHAR2(4000)`, `VARCHAR2(10 CHAR)`, `NCHAR(10)`, `NVARCHAR2(2000)`, `CLOB`, `NCLOB`, `BLOB`, `RAW(2000)`, `LONG`, `LONG RAW`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `TIMESTAMP(0) WITH TIME ZONE`, `TIMESTAMP(0) WITH LOCAL TIME ZONE`, `INTERVAL YEAR(9) TO MONTH`, `INTERVAL YEAR(2) TO MONTH`, `INTERVAL DAY(9) TO SECOND(9)`, `INTERVAL DAY(2) TO SECOND(0)`, `ROWID`, `UROWID(4000)`, `JSON`, `XMLTYPE`, `BOOLEAN`, `VECTOR(3, FLOAT32)`, `VECTOR(2, FLOAT64)`, `VECTOR(2, INT8)` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | mongo | `double` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `int` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `long` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |

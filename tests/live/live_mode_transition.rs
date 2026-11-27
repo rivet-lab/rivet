@@ -635,11 +635,6 @@ fn accept(rig: &Rig, export: &str) {
     }
 }
 
-/// Whether a walk applies every remedy: under a Postgres state the rig cannot copy the refused state back and applies the first only.
-fn walks_every_remedy() -> bool {
-    crate::common::state_url_under_test().is_none()
-}
-
 /// A run after an accepted edit is a run like any other: exit 0 and nothing delivered again.
 fn continues_after_the_acceptance(rig: &Rig, ids: &dyn Fn() -> Vec<i64>) {
     let before = ids();
@@ -674,8 +669,7 @@ fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
         ],
     );
     let rig = staged_for(e, e.rig(&table), &parallel, dest.path());
-    let crash = rig.run_with_env("RIVET_TEST_PANIC_AT", "keyset_parallel_range_committed:3");
-    assert!(!crash.status.success(), "the injected crash must stop it");
+    rig.crash_as_the_last_keyset_range_commits();
     rig.run_ok();
     assert_eq!(
         delivered_ids(e, dest.added().path()).len(),
@@ -748,7 +742,7 @@ fn incremental_query_filter_edited(e: SqlEngine, walk: bool) {
         delivered_ids(e, third).is_empty(),
         "a refused run writes nothing"
     );
-    if !walks_every_remedy() {
+    if !said.every_remedy_applied() {
         return assert_eq!(
             delivered_ids(e, fresh.path()),
             (1..=5).collect::<Vec<_>>(),
@@ -1082,7 +1076,7 @@ fn same_table_in_another_schema(walk: bool) {
         ],
     );
     let delta = read_ids(dest.added().path());
-    if walks_every_remedy() {
+    if said.every_remedy_applied() {
         assert_eq!(
             delta,
             vec![11, 12],

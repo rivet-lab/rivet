@@ -1,63 +1,17 @@
 name: CI
 
-# Required branch-protection checks on `main`, READ FROM THE API (not from
-# memory) on 2026-08-16 via
-#   gh api repos/:owner/:repo/branches/main/protection
-# and listed by CHECK NAME, which is the `name:` of the job — the previous
-# ledger listed eight JOB IDs (`fmt`, `clippy`, `test`, …), a naming GitHub
-# never uses, and omitted ten of the eighteen contexts that are actually
-# required. Three other comments in this file then contradicted it. Only the API
-# is truth; this list is a snapshot and must be re-read before it is trusted:
-#
-#   Clippy · Compatibility matrix tests (semantic gate) ·
-#   Generated docs are in sync (docs-as-code) · Invariant tests (semantic gate) ·
-#   Mutants (changed lines) · New config keys carry tests ·
-#   OSS must not depend on rivet-pro (one-way seam, ADR-0026) ·
-#   PR regression matrices (cli + cfg + path) · Recovery tests (semantic gate) ·
-#   Release build · Rustfmt · Security audit ·
-#   Stability tests — Phase 1 (semantic gate) · Tests ·
-#   Type mapping contracts (semantic gate) ·
-#   Type round-trip validators — DuckDB · ClickHouse · pyarrow (semantic gate) ·
-#   Type-golden tests (semantic gate)
-#
-# (strict: true — a branch must be up to date with main before merging.)
-#
-# NOT required, as of the same read: `Mutants (gate sanity)`,
-# `Gate scripts (self-tests)` and `Mutants (coverage verdict)`. Two things
-# follow, and neither can be fixed from this file:
-#
-#  * `Mutants (changed lines)` IS required and is `continue-on-error: true`.
-#    CORRECTED 2026-08-17 by observation, having been asserted the other way
-#    here and at the budget guard below: job-level `continue-on-error` does NOT
-#    launder the conclusion. A run whose mutate step exits 2 reports
-#    `conclusion: failure`, the check shows `fail`, and with the context in
-#    branch protection the PR is BLOCKED. Measured on PR #233, whose four missed
-#    mutants held the merge. So the requirement is load-bearing after all, and
-#    the practical consequence is the one the previous note missed: this gate
-#    does NOT consult `docs/mutants-baseline.txt` (that ledger is the NIGHTLY
-#    job's), so "live-guarded, see the baseline" is not an answer it accepts —
-#    a live-only path touched by a PR must grow a unit-level oracle or the PR
-#    cannot merge. The evidence about what it actually graded is published as
-#    job OUTPUTS and asserted by `Mutants (coverage verdict)` regardless.
-#  * `Mutants (coverage verdict)` is the one check that has to be ADDED to
-#    branch protection for the mutation gate to block anything: it runs with
-#    `if: always()` and fails unless `Mutants (gate sanity)`,
-#    `Gate scripts (self-tests)` and the per-diff run all reached a real
-#    verdict, so requiring it transitively requires those three. (A job skipped
-#    by a failed `needs` counts as PASSING for a required check, which is why it
-#    is `always()` rather than a plain dependency.)
-#
-# The semantic-gate jobs below run each suite in isolation so GitHub can
-# block merges on named regressions, not just overall build failures.
-# `Type round-trip validators` brings up the DuckDB/ClickHouse oracle containers
-# so the type round-trip suite (previously only runnable by hand via the
-# Makefile) is enforced on every PR.
+# Required checks on `main` (branch protection read from the API on 2026-11-22, strict: false):
+#   Clippy · Gate scripts (self-tests) · Mutants (changed lines) · New config keys carry tests ·
+#   OSS must not depend on rivet-pro (one-way seam, ADR-0026) · PR rules (text, raised ratchets, CHANGELOG) ·
+#   Release build · Rustfmt · Security audit · Tests
+# `Mutants (changed lines)` is the always-running `mutants-required`; docs/reference/testing.md describes the `ready` flow.
 
 on:
   push:
     branches: [master, main]
   pull_request:
     branches: [master, main, pre-0.34.0]
+    types: [opened, synchronize, reopened, labeled]
   # The MERGE QUEUE's own trigger. Without it a queued PR waits forever for
   # checks that never start, so this line must land BEFORE the queue is turned
   # on in the repository settings, never after.
@@ -86,8 +40,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MUTANTS_READY_LABEL: ready
   # How many in-diff mutants the `mutants-in-diff` budget can grade
-  # (~80s each at -j2 on a 2-core runner). ONE definition, read by both the job
+  # (measured 4.8-7.1 min each at -j2 on a 2-core runner). ONE definition, read by both the job
   # that spends the budget and the blocking `mutants-gate-sanity` job that
   # audits what the budget skipped — two copies of this number are two gates
   # that can disagree about whether a diff was graded.
@@ -218,8 +173,6 @@ jobs:
     if: github.event_name == 'pull_request'
     # The reach measurement is capped at 25m of its own; the rest is listing.
     timeout-minutes: 45
-    # Like the run it plans, this job cannot fail a PR: what it decided is
-    # published and `Mutants (changed lines)` re-publishes it for the verdict.
     continue-on-error: true
     outputs:
       code: ${{ steps.scope.outputs.code }}
@@ -235,6 +188,7 @@ jobs:
       cache: ${{ steps.plan.outputs.cache }}
       shards: ${{ steps.plan.outputs.shards }}
       shard_n: ${{ steps.plan.outputs.shard_n }}
+      held: ${{ steps.plan.outputs.held }}
       outcome: ${{ steps.plan.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -344,6 +298,7 @@ jobs:
           # set — merge-base(base, HEAD)..HEAD — so one expression serves both
           # events, and the gate grades the PR's own changes in the queue too.
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          READY: ${{ contains(github.event.pull_request.labels.*.name, env.MUTANTS_READY_LABEL) }}
         run: |
           set -euo pipefail
           # Everything this step decides is PUBLISHED, because the job's
@@ -375,30 +330,6 @@ jobs:
             fi
           }
           git diff "$BASE_SHA"...HEAD > pr.diff
-          # BUDGET GUARD. Every mutant is its own incremental build — ~80s on a
-          # 2-core runner at -j2, so the job's ceiling grades roughly 120
-          # ($MUTANTS_DIFF_BUDGET). A five-round branch like #230 yields 416
-          # (158 run.rs, 104 pool.rs, 44 adaptive.rs, ...) ≈ 4.6 h: the job dies
-          # at the ceiling having graded a fraction of the diff and reported
-          # nothing about the rest. `Mutants (changed lines)` IS a required check
-          # (verified against the API — see the ledger at the top of this file),
-          # and — corrected 2026-08-17 — it DOES block: `continue-on-error` does
-          # not launder the conclusion, so a failed mutate step holds the merge
-          # (measured on PR #233). What a timeout costs is therefore worse than a
-          # diff nobody graded: it is a diff nobody graded AND a merge nobody can
-          # complete. The blocking `Mutants (coverage verdict)` job fails on the
-          # "no verdict recorded" case, which is what a timeout looks like from
-          # outside.
-          #
-          # What the guard hands the work to is CHECKED, not claimed. The first
-          # version of this notice said "these modules are covered by the nightly
-          # tier rotation" — a statement about a hand-written list of 31 files in
-          # nightly-live.yml, while the tree has 198 `src/**.rs`. The branch that
-          # introduced the notice rewrote plan_cmd.rs (+478) and aggregate.rs
-          # (+128), neither in ANY tier: 606 lines graded by nothing, under a
-          # notice saying otherwise. The rotation is gone (2026-08-17) and so is
-          # the deferral: an over-budget diff is now reported as UNGRADED rather
-          # than handed to a mechanism that never finished a tier.
           list_into diff-list.txt
           COUNT=$(grep -c . diff-list.txt || true)
           say count "$COUNT"
@@ -497,17 +428,23 @@ jobs:
           # exact tree, or the run happens in full (see mutants_cache.py).
           if [ "$N" -gt 0 ] && [ -f .mutants-cache/outcomes.json ] \
              && python3 .github/scripts/mutants_cache.py replay .mutants-cache/outcomes.json graded.txt >/dev/null; then
+            CACHE=hit
             say cache hit
             echo "::notice::every mutant this diff grades was already measured against identical src/, tests/, Cargo.lock and .cargo/mutants.toml — replaying rather than re-running. A RE-run saved, not a grading skipped."
           else
+            CACHE=miss
             say cache miss
             rm -rf .mutants-cache
           fi
-          # Up to eight runners, at least ~10 mutants each: every shard pays a build and a
-          # baseline (~6 min), so a small diff on eight runners buys nothing.
+          # Shards = ceil(N / 10).
           SHARD_N=$(( (N + 9) / 10 ))
-          SHARD_N=$(( SHARD_N > 8 ? 8 : SHARD_N ))
           say shard_n "$SHARD_N"
+          if [ "$CACHE" = miss ] && [ "$SHARD_N" -gt 0 ] && [ "$READY" != "true" ]; then
+            say held true
+            echo "::warning::the mutation shards are HELD: no outcomes are recorded for this exact code, and the head is not labeled '$MUTANTS_READY_LABEL'. Push freely; add the label on the final head to run them. Mutants (changed lines) stays red until then."
+          else
+            say held false
+          fi
           say shards "$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARD_N")"
       - name: Hand the plan to the shards
         if: steps.plan.outputs.state == 'in-budget'
@@ -526,13 +463,11 @@ jobs:
           retention-days: 3
 
   # The graded set, cut in `shard_n` slices by cargo-mutants' own `--shard`.
-  # A shard never decides anything: it records its outcomes and its exit code,
-  # and `Mutants (changed lines)` grades them together.
   mutants-shard:
     name: Mutants (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     needs: mutants-plan
-    if: needs.mutants-plan.outputs.state == 'in-budget' && needs.mutants-plan.outputs.cache == 'miss' && needs.mutants-plan.outputs.shard_n != '0'
+    if: needs.mutants-plan.outputs.state == 'in-budget' && needs.mutants-plan.outputs.cache == 'miss' && needs.mutants-plan.outputs.shard_n != '0' && needs.mutants-plan.outputs.held != 'true'
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -591,22 +526,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  # THE REQUIRED CHECK. It grades the shards' outcomes as one run and publishes
-  # what the per-diff run used to publish, so the verdict, the sanity audit and
-  # harness-metrics read one job whatever the fan-out below it.
-  #
-  # `continue-on-error` makes this job's CONCLUSION success whatever happens
-  # in it, so neither a required-check setting nor a `needs:` can observe what
-  # it did. What it did is therefore PUBLISHED as job outputs and asserted by
-  # the blocking `Mutants (coverage verdict)` job below — the coverage-ledger
-  # process rule: the claim "these files are graded" has to be read off
-  # the call site, not asserted about it. It still blocks on a miss:
-  # `continue-on-error` does not launder the conclusion (measured on PR #233).
+  # Grades the shards' outcomes as one run and publishes the verdict that `mutants-required` and `mutants-verdict` read.
   mutants-in-diff:
-    name: Mutants (changed lines)
+    name: Mutants (grade)
     runs-on: ubuntu-latest
     needs: [mutants-plan, mutants-shard]
-    if: always() && github.event_name == 'pull_request'
+    if: always() && github.event_name == 'pull_request' && needs.mutants-plan.outputs.held != 'true'
     timeout-minutes: 15
     continue-on-error: true
     outputs:
@@ -702,9 +627,10 @@ jobs:
               exit 1
             fi
           fi
+          VERDICT=""
           case "$rc" in
-            0) say result clean ;;
-            2) say result missed ;;
+            0) VERDICT=clean ;;
+            2) VERDICT=missed ;;
           esac
           # The run's own tally over the GRADED class, for the thermometer.
           for class in caught missed timeout unviable; do
@@ -731,6 +657,7 @@ jobs:
               say p2_audit skipped-over-budget
             fi
           fi
+          if [ -n "$VERDICT" ]; then say result "$VERDICT"; fi
           exit "$rc"
       - name: Save mutation outcomes
         if: always() && needs.mutants-plan.outputs.cache == 'miss' && steps.grade.outputs.p2_audit != 'oracle-lied' && hashFiles('.mutants-cache/outcomes.json') != ''
@@ -752,22 +679,7 @@ jobs:
           PLAN_COUNT: ${{ needs.mutants-plan.outputs.count }}
         run: python3 .github/scripts/mutants_report.py
 
-  # Is the mutation gate GRADING ANYTHING? Split out of `mutants-in-diff` on
-  # purpose: that job is `continue-on-error: true` (a foundational-module PR
-  # genuinely cannot finish its 42-minute run), so nothing inside it can fail a
-  # PR — and "cannot fail" is exactly how the vacuous gate survived. One
-  # unescaped `|` in .cargo/mutants.toml's exclude_re (regex ALTERNATION with an
-  # EMPTY branch) excluded 18,568 of 18,670 mutants; the gate reported green in
-  # 23s with `INFO No mutants to filter` on all eight runs of #227/#229/#230 and
-  # nobody acted.
-  #
-  # Everything here is `--list` only: no mutant is built or run, so the whole
-  # job is seconds of cargo-mutants parsing plus its install. It is NOT
-  # continue-on-error — a failure here turns the workflow run red. It is not (as
-  # an earlier comment here claimed) a required check: see the ledger at the top
-  # of this file, read from the API. `Mutants (coverage verdict)` requires this
-  # job to have SUCCEEDED, so making that one required is what gives this one
-  # teeth.
+  # Lists only: audits that the exclusions in .cargo/mutants.toml do not swallow the diff.
   mutants-gate-sanity:
     name: Mutants (gate sanity)
     runs-on: ubuntu-latest
@@ -1015,18 +927,7 @@ jobs:
           state over-budget-ungraded
           echo "::notice::this diff yields $graded mutants, past the $MUTANTS_DIFF_BUDGET the per-diff budget can grade, and there is no nightly rotation to defer to — so mutation testing says NOTHING about this diff. That is a size fact, not a failure; split the PR if you want the coverage."
 
-  # The claim the two jobs above make about each other, checked. `mutants-in-diff`
-  # is `continue-on-error: true`, so its conclusion is SUCCESS however it ends —
-  # no `needs:`, no required-check setting and no branch protection can see that
-  # one of its mutants was MISSED, that cargo-mutants failed, or that it timed
-  # out. This job reads the evidence it recorded (job outputs) and compares it
-  # with the audit `mutants-gate-sanity` computed independently.
-  #
-  # `if: always()` rather than a plain `needs:` because GitHub counts a job
-  # SKIPPED by a failed dependency as passing for a required check — a blocking
-  # job that vanishes when its dependency breaks is the fail-open shape this
-  # whole file keeps paying for. Every dependency's result is asserted here
-  # instead.
+  # Checks the claim `Mutants (grade)` and `Mutants (gate sanity)` make about each other.
   mutants-verdict:
     name: Mutants (coverage verdict)
     runs-on: ubuntu-latest
@@ -1059,7 +960,7 @@ jobs:
             exit 1
           fi
           if [ "$RUN_RESULT" = "cancelled" ] || [ "$RUN_RESULT" = "skipped" ]; then
-            echo "::error::'Mutants (changed lines)' was $RUN_RESULT — no mutation verdict exists for this diff."
+            echo "::error::'Mutants (grade)' was $RUN_RESULT — no mutation verdict exists for this diff (a head held for the ready label has none until it is labeled)."
             exit 1
           fi
           if [ "$EXPECTED" = "docs-only" ] && [ "$STATE" = "docs-only" ]; then
@@ -1067,7 +968,7 @@ jobs:
             exit 0
           fi
           if [ -z "$STATE" ]; then
-            echo "::error::'Mutants (changed lines)' recorded NO state (step outcome: ${OUTCOME:-none}) — it never reached a verdict about this diff. Because that job is continue-on-error its own red X does not block; this one does. Read its log: the usual causes are a failed cargo-mutants install and the two-hour timeout (if it timed out inside the budget, MUTANTS_DIFF_BUDGET is set too high)."
+            echo "::error::'Mutants (grade)' recorded NO state (step outcome: ${OUTCOME:-none}) — it never reached a verdict about this diff. Because that job is continue-on-error its own red X does not block; this one does. Read its log: the usual causes are a failed cargo-mutants install and the two-hour timeout (if it timed out inside the budget, MUTANTS_DIFF_BUDGET is set too high)."
             exit 1
           fi
           # THE PRIORITISATION'S OWN INVARIANTS. The run job cannot fail (it is
@@ -1080,7 +981,7 @@ jobs:
           # disagree — so nothing may be deprioritised on it, and this is a hard
           # failure rather than a note.
           if [ "$P2_AUDIT" = "oracle-lied" ]; then
-            echo "::error::'Mutants (changed lines)' deprioritised mutants as unkillable offline and then CAUGHT some of them offline. The coverage measurement and the test run contradict each other, so the report-only class cannot be trusted to hold anything. Read that job's log (the caught names are printed there): either the reach measurement is measuring the wrong test scope, or the classifier is putting reachable code in the report-only class."
+            echo "::error::'Mutants (grade)' deprioritised mutants as unkillable offline and then CAUGHT some of them offline. The coverage measurement and the test run contradict each other, so the report-only class cannot be trusted to hold anything. Read that job's log (the caught names are printed there): either the reach measurement is measuring the wrong test scope, or the classifier is putting reachable code in the report-only class."
             exit 1
           fi
           if [ -n "$P1" ] && [ -n "$COUNT" ] && [ "$P1" -gt "$COUNT" ]; then
@@ -1108,13 +1009,13 @@ jobs:
             exit 1
           fi
           if [ "$RESULT" = "tool-error" ]; then
-            echo "::error::'Mutants (changed lines)' ended in a TOOL error, not a verdict (state '$STATE'). A broken cargo-mutants invocation used to read as 'zero mutants' and pass; it is a failure."
+            echo "::error::'Mutants (grade)' ended in a TOOL error, not a verdict (state '$STATE'). A broken cargo-mutants invocation used to read as 'zero mutants' and pass; it is a failure."
             exit 1
           fi
           case "$STATE" in
             in-budget)
               if [ -z "$RESULT" ]; then
-                echo "::error::'Mutants (changed lines)' had this diff in scope (state '$STATE', step outcome ${OUTCOME:-none}) and recorded NO verdict — the run was killed mid-flight, which on this job means the two-hour timeout. An in-scope diff that nothing finished grading is the vacuous gate with a longer runtime. If it timed out while under the count guard, MUTANTS_DIFF_BUDGET ($MUTANTS_DIFF_BUDGET) is set too high for this runner."
+                echo "::error::'Mutants (grade)' had this diff in scope (state '$STATE', step outcome ${OUTCOME:-none}) and recorded NO verdict — the run was killed mid-flight, which on this job means the two-hour timeout. An in-scope diff that nothing finished grading is the vacuous gate with a longer runtime. If it timed out while under the count guard, MUTANTS_DIFF_BUDGET ($MUTANTS_DIFF_BUDGET) is set too high for this runner."
                 exit 1
               fi
               ;;
@@ -1140,12 +1041,47 @@ jobs:
             exit 0
           fi
           if [ "$RESULT" = "missed" ]; then
-            echo "::warning::'Mutants (changed lines)' reports MISSED mutants in this diff (${P1:-$COUNT} graded of $COUNT in scope). Every one of them is in code the offline suite EXECUTES when reach='$REACH' is 'measured' — a test ran that line and did not notice the change, which is an assertion gap in your own code, not a live-only path. Read its log."
+            echo "::warning::'Mutants (grade)' reports MISSED mutants in this diff (${P1:-$COUNT} graded of $COUNT in scope). Every one of them is in code the offline suite EXECUTES when reach='$REACH' is 'measured' — a test ran that line and did not notice the change, which is an assertion gap in your own code, not a live-only path. Read its log."
           fi
           if [ "${P2:-0}" -gt 0 ] && [ "$P2_AUDIT" = "skipped-over-budget" ]; then
             echo "::warning::$P2 in-diff mutants sit in functions the offline suite never executes; the budget did not stretch to running them, so nothing in this run contradicts that classification. Triage them in .cargo/mutants.toml with the live oracle that DOES kill them (proven by hand, per the entries already there), or give them a unit oracle and they move into the graded class."
           fi
           echo "ok: audit and run agree on '$STATE'; the run's verdict is '${RESULT:-n/a}' over ${P1:-$COUNT} graded / ${P2:-0} reported mutants (reach='${REACH:-n/a}', report-only audit '${P2_AUDIT:-n/a}')."
+
+  # The required `Mutants (changed lines)`; runs on every pull_request and merge_group event.
+  mutants-required:
+    name: Mutants (changed lines)
+    runs-on: ubuntu-latest
+    needs: [mutants-plan, mutants-in-diff]
+    if: always() && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Make sure the base commit is present
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
+      - name: A head with Rust to mutate needs a recorded mutants verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          REPO: ${{ github.repository }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+          READY: ${{ contains(github.event.pull_request.labels.*.name, env.MUTANTS_READY_LABEL) }}
+          HELD: ${{ needs.mutants-plan.outputs.held }}
+          STATE: ${{ needs.mutants-in-diff.outputs.state }}
+          RESULT: ${{ needs.mutants-in-diff.outputs.result }}
+          OUTCOME: ${{ needs.mutants-in-diff.outputs.outcome }}
+        run: python3 .github/scripts/mutants_gate.py check
 
   # A THERMOMETER for the harness itself — the one job here that grades nothing.
   #

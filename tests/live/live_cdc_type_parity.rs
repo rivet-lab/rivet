@@ -47,6 +47,7 @@ struct Row {
     refuses: bool,
 }
 
+#[derive(Clone)]
 struct Ledger {
     setup: Vec<String>,
     rows: Vec<Row>,
@@ -130,6 +131,46 @@ fn ledger(engine: &str) -> Ledger {
 /// `render.duck` for a type DuckDB cannot read exactly (Decimal256 reads as DOUBLE, ADR-0038 CP11).
 const ARROW: &str = "arrow";
 
+/// The ledger row `native` of `engine` as the column a `columns: {C: timestamp}` override delivers: Timestamp(µs), the digits past the sixth cut.
+#[cfg(feature = "oracle")]
+fn declared_timestamp_row(engine: &str, native: &str) -> Row {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
+    let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let r = doc["engines"][engine]["rows"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("engines.{engine}.rows is not a list"))
+        .iter()
+        .find(|r| r["native_type"].as_str() == Some(native))
+        .unwrap_or_else(|| panic!("engines.{engine}: no ledger row {native}"));
+    Row {
+        native: native.to_string(),
+        sample: r["sample"]
+            .as_sequence()
+            .expect("sample")
+            .iter()
+            .map(|v| v.as_str().expect("sample literal").to_string())
+            .collect(),
+        delivery: "Timestamp(µs)".to_string(),
+        render: Render {
+            source: Some(
+                "SUBSTR(TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9'), 1, 27)".to_string(),
+            ),
+            duck: Some("strftime({c}, '%Y-%m-%dT%H:%M:%S.%f')".to_string()),
+            server: None,
+            canon: Some("timestamp".to_string()),
+        },
+        known_defect: None,
+        today_delivery: None,
+        defect_samples: Vec::new(),
+        clickhouse: Some("Nullable(DateTime64(6, 'UTC'))".to_string()),
+        today_clickhouse: None,
+        clickhouse_defect: None,
+        clickhouse_defect_samples: Vec::new(),
+        refuses: false,
+    }
+}
+
 /// The ledger without the rows batch refuses today, and those rows.
 fn split_refused(lg: Ledger) -> (Ledger, Vec<Row>) {
     let (refused, rows) = lg.rows.into_iter().partition(|r| r.refuses);
@@ -140,6 +181,38 @@ fn split_refused(lg: Ledger) -> (Ledger, Vec<Row>) {
         },
         refused,
     )
+}
+
+/// The ledger without the rows ClickHouse loads as an `Array`, and those rows: a NULL list is refused at load.
+fn split_lists(lg: Ledger) -> (Ledger, Vec<Row>) {
+    let (lists, rows) = lg.rows.into_iter().partition(|r| {
+        r.clickhouse
+            .as_deref()
+            .is_some_and(|t| t.starts_with("Array("))
+    });
+    (
+        Ledger {
+            setup: lg.setup,
+            rows,
+        },
+        lists,
+    )
+}
+
+/// Load a warehouse export that holds NULL lists and assert the one coded refusal that names the list column.
+fn assert_null_list_refused(w: &Warehouse) {
+    let out = w
+        .rig
+        .load_args_env(&[], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", 5),
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("holds a NULL list, and a ClickHouse Array cannot be NULL"),
+        "the refusal must name the NULL list: {said}"
+    );
 }
 
 /// How the verdict reads the source.
@@ -914,7 +987,11 @@ struct Seen {
 /// The ledger verdict on one column: wrong types and values, excused only by the class a marker declares, and every marker or defect sample that no longer fires.
 fn grade_column(what: &str, r: &Row, seen: &Seen) -> Vec<String> {
     let mut bad = Vec::new();
-    let (kd, chd) = (r.known_defect.is_some(), r.clickhouse_defect.is_some());
+    let ch_ran = seen.clickhouse.is_some();
+    let (kd, chd) = (
+        r.known_defect.is_some(),
+        r.clickhouse_defect.is_some() && ch_ran,
+    );
     let (mut kd_hits, mut ch_hits) = (0usize, 0usize);
     let mut hit_samples: std::collections::BTreeSet<(bool, &str)> = Default::default();
     for (mode, got) in &seen.types {
@@ -974,7 +1051,7 @@ fn grade_column(what: &str, r: &Row, seen: &Seen) -> Vec<String> {
         (false, &r.defect_samples),
         (true, &r.clickhouse_defect_samples),
     ] {
-        for s in list {
+        for s in list.iter().filter(|_| !ch || ch_ran) {
             if !hit_samples.contains(&(ch, s.as_str())) {
                 bad.push(format!(
                     "{what}: defect sample `{s}` now matches the source — drop it from the ledger"
@@ -1082,6 +1159,12 @@ fn grade_column_excuses_only_the_declared_defect_class_and_flags_stale_markers()
                 ..Seen::default()
             },
             vec!["c0 T id 1: batch Some(\"[]\"), source Some(\"NULL\")"],
+        ),
+        (
+            "a ClickHouse marker on a run that loaded nothing is not stale",
+            &chd,
+            Seen::default(),
+            vec![],
         ),
         (
             "a stale marker",
@@ -1846,6 +1929,11 @@ fn census_violations(rig: &Rig, want: i64) -> Vec<String> {
 fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
     use postgres::NoTls;
     let (lg, refused) = split_refused(ledger("postgres"));
+    let (loadable, lists) = split_lists(lg.clone());
+    assert!(
+        !lists.is_empty(),
+        "the postgres ledger must hold list rows ClickHouse refuses a NULL of"
+    );
     let connect = || postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     for s in &lg.setup {
         connect().batch_execute(s).unwrap();
@@ -1890,18 +1978,35 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         };
         (st, guards)
     };
-    let (st, _g) = stand(&lg.rows, "ledger_pg", true);
+    let (mut st, _g) = stand(&lg.rows, "ledger_pg", true);
     let n = seed(&lg, &st);
     capture(&st);
     rewrite(&lg, &st, n);
     capture(&st);
-    load(&st);
+    assert_null_list_refused(st.warehouse.as_ref().expect("warehouse leg"));
+    st.warehouse = None;
     st.batch.run_ok();
     let mut bad = duckdb_ledger_verdict(&lg, &st, n);
     bad.extend(census_violations(&st.batch, 3 * n));
     assert!(
         bad.is_empty(),
         "{} ledger violations:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+
+    let (st, _gl) = stand(&loadable.rows, "ledger_pg_ch", true);
+    let n = seed(&loadable, &st);
+    capture(&st);
+    rewrite(&loadable, &st, n);
+    capture(&st);
+    load(&st);
+    st.batch.run_ok();
+    let mut bad = duckdb_ledger_verdict(&loadable, &st, n);
+    bad.extend(census_violations(&st.batch, 3 * n));
+    assert!(
+        bad.is_empty(),
+        "{} ledger violations (ClickHouse leg, rows without a list):\n{}",
         bad.len(),
         bad.join("\n")
     );
@@ -2040,23 +2145,17 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let _serial = cross_process_serial("oracle_cdc");
     const DECLARED: &str = "TIMESTAMP(9)";
     let mut lg = ledger("oracle");
-    lg.rows
-        .iter_mut()
-        .filter(|r| r.native == DECLARED)
-        .for_each(|r| r.refuses = false);
+    let declared_at = lg.rows.len();
+    lg.rows.push(declared_timestamp_row("oracle", DECLARED));
     let t = crate::live_cdc_oracledb::cdc_table(
         "ledger_ora",
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
     );
-    let declared = format!(
-        "columns: {{{}}}",
-        lg.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.native == DECLARED)
-            .map(|(i, _)| format!("C{i}: timestamp"))
-            .collect::<Vec<_>>()
-            .join(", ")
+    let declared = format!("columns: {{C{declared_at}: timestamp}}");
+    assert_eq!(
+        lg.rows.iter().filter(|r| r.native == DECLARED).count(),
+        2,
+        "the ledger's undeclared {DECLARED} text column and the declared one are both graded"
     );
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")

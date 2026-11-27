@@ -160,7 +160,16 @@ ORACLE = [
         ),
     ),
     _risky("oracle", "rivet_sent_date_bc", "DATE", "DATE '-0044-03-15'", bc_text=True),
-    _risky("oracle", "rivet_sent_ts9", "TIMESTAMP(9)", "TIMESTAMP '2024-01-01 00:00:00.000000001'"),
+    Table(
+        "rivet_sent_ts9",
+        "CREATE TABLE rivet_sent_ts9 (id INT PRIMARY KEY, v TIMESTAMP(9))",
+        (
+            "(1, TIMESTAMP '2024-01-01 00:00:00.000000001')",
+            "(2, NULL)",
+            "(3, TIMESTAMP '0001-01-01 00:00:00.123456789')",
+            "(4, TIMESTAMP '9999-12-31 23:59:59.999999999')",
+        ),
+    ),
 ]
 
 TABLES = {"postgres": PG, "mysql": MYSQL, "mssql": MSSQL, "oracle": ORACLE}

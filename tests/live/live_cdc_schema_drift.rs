@@ -161,6 +161,114 @@ fn mssql_cdc_retyped_column_refuses_under_fail_and_defers_not_drops() {
     duckdb_assert_deferred_changes_landed(&rig.out_dir(), 20);
 }
 
+const KEY_ID: &str = "load: { target: bigquery, project: p, dataset: d, pk: [id] }";
+const KEY_MISSING: &str = "load: { target: bigquery, project: p, dataset: d, pk: [nope] }";
+
+/// Whether the stored baseline of the rig's export records `v` with the given Arrow type.
+fn stored_v_is(rig: &Rig, arrow: &str) -> bool {
+    rig.state_count(&format!(
+        "SELECT COUNT(*) FROM export_schema WHERE export_name = '{{export}}' \
+         AND columns_json LIKE '%{{\"name\":\"v\",\"type\":\"{arrow}\"}}%'"
+    )) > 0
+}
+
+/// A CDC run that drifted under the default policy and is then refused after the drift check leaves the stored baseline as it found it; the retry that ends clean moves it.
+fn a_refused_cdc_run_leaves_the_stored_baseline_as_it_found_it(rig: Rig, retype: &dyn Fn()) {
+    let mut rig = rig.top_line(KEY_ID);
+    rig.run_ok();
+    assert!(stored_v_is(&rig, "Int32"));
+    retype();
+    rig.replace_top_line("load:", KEY_MISSING);
+    let refused = rig.run_expect_fail();
+    assert!(
+        refused.contains("RIVET_LOAD_KEY_COLUMN_INVALID"),
+        "the run must be refused after the drift check, got:\n{refused}"
+    );
+    assert!(
+        stored_v_is(&rig, "Int32") && !stored_v_is(&rig, "Int64"),
+        "a refused run must not store the schema it observed"
+    );
+    rig.replace_top_line("load:", KEY_ID);
+    rig.run_ok();
+    assert!(
+        stored_v_is(&rig, "Int64"),
+        "the run that ended clean stores the schema it observed"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
+fn pg_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it() {
+    use postgres::NoTls;
+    let tbl = unique_name("cdc_keep_pg");
+    let slot = unique_name("rivet_keep_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {tbl}; CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT)"
+    ))
+    .unwrap();
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let c = std::cell::RefCell::new(c);
+    a_refused_cdc_run_leaves_the_stored_baseline_as_it_found_it(Rig::pg_cdc(&tbl, &slot), &|| {
+        c.borrow_mut()
+            .batch_execute(&format!(
+                "INSERT INTO {tbl} VALUES (1, 10); ALTER TABLE {tbl} ALTER COLUMN v TYPE BIGINT; \
+                 INSERT INTO {tbl} VALUES (2, 30000000000)"
+            ))
+            .unwrap();
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc (binlog ROW)"]
+fn mysql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it() {
+    let tbl = unique_name("cdc_keep_my");
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL)
+        .and_then(|p| p.get_conn())
+        .expect("connect mysql-cdc");
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT)"))
+        .unwrap();
+    let _guard = MysqlCdcTable(tbl.clone());
+    let c = std::cell::RefCell::new(c);
+    a_refused_cdc_run_leaves_the_stored_baseline_as_it_found_it(Rig::mysql_cdc(&tbl), &|| {
+        let mut c = c.borrow_mut();
+        c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 10)"))
+            .unwrap();
+        c.query_drop(format!("ALTER TABLE {tbl} MODIFY v BIGINT"))
+            .unwrap();
+        c.query_drop(format!("INSERT INTO {tbl} VALUES (2, 30000000000)"))
+            .unwrap();
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("cdc_keep_ms");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, v INT)"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    a_refused_cdc_run_leaves_the_stored_baseline_as_it_found_it(
+        Rig::mssql_cdc(&table, &ci),
+        &|| {
+            mssql_cdc_exec(&format!("INSERT INTO dbo.{table} VALUES (1, 10)"));
+            mssql_cdc_exec(&format!("ALTER TABLE dbo.{table} ALTER COLUMN v BIGINT"));
+            mssql_cdc_exec(&format!("INSERT INTO dbo.{table} VALUES (2, 20)"));
+            wait_for_capture(&ci, 2);
+        },
+    );
+}
+
 /// Accept one HTTP POST on a loopback port; its body arrives on the channel.
 fn one_shot_webhook() -> (String, std::sync::mpsc::Receiver<String>) {
     use std::io::{Read as _, Write as _};

@@ -34,6 +34,7 @@ the two implementations apart.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -342,42 +343,22 @@ def _cdc_mysql_cleanup(url: str, work: Path) -> None:
     _mysql(url, "DROP TABLE IF EXISTS orc_cdc_probe;")
 
 
+MSSQL_PROBE_SQL = (
+    "IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = DB_NAME()) = 0 EXEC sys.sp_cdc_enable_db;\n"
+    "IF EXISTS (SELECT 1 FROM cdc.change_tables WHERE capture_instance = 'dbo_orc_cdc_probe')\n"
+    "  EXEC sys.sp_cdc_disable_table @source_schema='dbo', @source_name='orc_cdc_probe', @capture_instance='dbo_orc_cdc_probe';\n"
+    "IF OBJECT_ID('dbo.orc_cdc_probe') IS NOT NULL DROP TABLE dbo.orc_cdc_probe;\n"
+    "CREATE TABLE dbo.orc_cdc_probe (id int PRIMARY KEY, amount decimal(18,4), meta nvarchar(200));\n"
+    "EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='orc_cdc_probe', @role_name=NULL, @capture_instance='dbo_orc_cdc_probe';\n"
+)
+
+
 def _cdc_mssql(url: str, work: Path) -> str | None:
-    p = _sqlcmd(
-        url,
-        sql=(
-            # DISABLE BEFORE DROP, and guard on the capture instance rather than
-            # on a join to sys.tables.
-            #
-            # The original order was DROP TABLE first, then
-            # `IF EXISTS (cdc.change_tables ct JOIN sys.tables t ON
-            # ct.source_object_id = t.object_id WHERE t.name='orc_cdc_probe')`.
-            # Dropping the table ORPHANS its change table — the row survives in
-            # cdc.change_tables but `source_object_id` no longer resolves, so the
-            # join finds nothing, the disable is skipped, and the next
-            # `sp_cdc_enable_table` fails with 22926: "capture instance name
-            # 'dbo_orc_cdc_probe' already exists". It alternated pass/fail run to
-            # run, which read as a race and is not one: it is order-dependent
-            # state the guard could no longer see.
-            "IF EXISTS (SELECT 1 FROM cdc.change_tables WHERE capture_instance = 'dbo_orc_cdc_probe')\n"
-            "  EXEC sys.sp_cdc_disable_table @source_schema='dbo', @source_name='orc_cdc_probe', @capture_instance='dbo_orc_cdc_probe';\n"
-            "IF OBJECT_ID('dbo.orc_cdc_probe') IS NOT NULL DROP TABLE dbo.orc_cdc_probe;\n"
-            "CREATE TABLE dbo.orc_cdc_probe (id int PRIMARY KEY, amount decimal(18,4), meta nvarchar(200));\n"
-            "EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='orc_cdc_probe', @role_name=NULL, @capture_instance='dbo_orc_cdc_probe';\n"
-        ),
-    )
+    """Enable CDC on the database and the probe table; None, with sqlcmd's output on stderr, when that fails."""
+    p = _sqlcmd(url, sql=MSSQL_PROBE_SQL)
     if not p.ok:
+        print(f"cdc[mssql]: probe setup failed (exit {p.returncode}): {p.out.strip()[-600:]}", file=sys.stderr)
         return None
-    # `sp_cdc_enable_table` returning success does NOT mean the capture instance
-    # is queryable: `fn_cdc_get_min_lsn` stays NULL until the capture job has run
-    # once, and rivet's own preflight reads exactly that function. So the fixture
-    # is not ready when the enable call returns — it is ready when the LSN is.
-    #
-    # Every mssql CDC cell of blessed_flow failed at `doctor` on this
-    # ("fn_cdc_get_min_lsn returned NULL — the capture instance does not exist"),
-    # which is the preflight being right about a fixture that had lied about
-    # being up. Waiting on the enable call's exit code is waiting on the wrong
-    # signal; a `time.sleep` here would be the same guess with a nicer face.
     ready = wait_until(
         lambda: "NULL"
         not in _sqlcmd(
@@ -396,33 +377,27 @@ def _cdc_mssql(url: str, work: Path) -> str | None:
     )
 
 
-def _mssql_max_lsn(url: str) -> str:
-    """The highest LSN the CDC capture job has PROCESSED, or 'NULL' if none yet.
-    Database-wide (`sys.fn_cdc_get_max_lsn`), so once the job ingests our
-    just-committed transaction it strictly advances past the value read before the
-    write — the precise "the capture job has caught up to my changes" signal that
-    a fixed `time.sleep` only guessed at."""
-    return _sqlcmd(
+MSSQL_CT_OP = {"delete": 1, "insert": 2, "update": 4}
+
+
+def _mssql_landed(url: str, instance: str, op: str, row_id: int) -> bool:
+    """Whether the capture instance's change table holds an `op` row for id `row_id`."""
+    out = _sqlcmd(
         url,
-        q="SELECT ISNULL(CONVERT(varchar(64), sys.fn_cdc_get_max_lsn(), 1), 'NULL')",
-    ).stdout.strip()
+        q=f"SET NOCOUNT ON; SELECT COUNT(*) FROM cdc.{instance}_CT WHERE __$operation = {MSSQL_CT_OP[op]} AND id = {row_id}",
+    ).stdout
+    return any(int(n) > 0 for n in re.findall(r"^\s*(\d+)\s*$", out, re.M))
 
 
-def _wait_mssql_captured(url: str, before: str) -> None:
-    """Poll until the capture job advances past `before` (the max-LSN read BEFORE
-    the write). Replaces a blind `time.sleep(8)`: it returns the instant the job
-    has captured our changes (often ~1-3s) and only waits out the full budget when
-    the Agent is genuinely slow — the same readiness-poll the fixture SETUP already
-    uses (`fn_cdc_get_min_lsn`), applied to the CHANGES too."""
-    wait_until(
-        lambda: _mssql_max_lsn(url) not in ("NULL", before),
-        tries=30,
-        delay=1.0,
-    )
+def _wait_mssql_captured(url: str, instance: str, op: str, row_id: int) -> bool:
+    """Poll until the LAST write's change row is in the instance's change table; False, with a stderr line, when it never lands."""
+    if wait_until(lambda: _mssql_landed(url, instance, op, row_id), tries=30, delay=1.0):
+        return True
+    print(f"cdc[mssql]: {instance} never captured {op} id={row_id} in 30 s", file=sys.stderr)
+    return False
 
 
 def _cdc_mssql_changes(url: str) -> None:
-    before = _mssql_max_lsn(url)
     _sqlcmd(
         url,
         sql=(
@@ -431,13 +406,12 @@ def _cdc_mssql_changes(url: str) -> None:
             "DELETE FROM dbo.orc_cdc_probe WHERE id=3;\n"
         ),
     )
-    _wait_mssql_captured(url, before)
+    _wait_mssql_captured(url, "dbo_orc_cdc_probe", "delete", 3)
 
 
 def _cdc_mssql_crashdelta(url: str) -> None:
-    before = _mssql_max_lsn(url)
     _sqlcmd(url, q='INSERT INTO dbo.orc_cdc_probe VALUES (4,4.4400,\'{"k":4}\');')
-    _wait_mssql_captured(url, before)
+    _wait_mssql_captured(url, "dbo_orc_cdc_probe", "insert", 4)
 
 
 def _cdc_mssql_cleanup(url: str, work: Path) -> None:
@@ -857,10 +831,8 @@ def _lc_insert(eng: str, url: str, t: str, ids: list[int]) -> bool:
     if eng == "mysql":
         return _mysql(url, f"INSERT INTO {t} VALUES {vals};").ok
     if eng == "mssql":
-        before = _mssql_max_lsn(url)
         ok = _sqlcmd(url, q=f"INSERT INTO dbo.{t} VALUES {vals};").ok
-        _wait_mssql_captured(url, before)
-        return ok
+        return ok and _wait_mssql_captured(url, f"dbo_{t}", "insert", ids[-1])
     docs = ",".join(f"{{_id:{i}}}" for i in ids)
     return _mongosh(url, (
         "const s=db.getMongo().startSession(); s.startTransaction(); "
@@ -1506,6 +1478,33 @@ def _differential_engine(led: "Ledger", eng: str, runner: Path) -> None:
                            "no verdict")
 
 
+def _mssql_capture_self_test() -> None:
+    """The capture wait ends only when the change row is in the change table, even though a DDL already advanced the max LSN."""
+    real = {k: globals()[k] for k in ("_sqlcmd", "wait_until")}
+    seen = {"polls": 0, "row_at": 5}
+
+    def server(_url, *, q=None, sql=None):
+        seen["polls"] += 1
+        if "fn_cdc_get_max_lsn" in q:
+            return Proc(["sqlcmd"], 0, "0x0000002B00000A48000200\n", "")
+        landed = int(seen["polls"] >= seen["row_at"] and "dbo_t_CT" in q and "__$operation = 2 AND id = 2003" in q)
+        return Proc(["sqlcmd"], 0, f"-----------\n{landed}\n", "")
+
+    globals()["_sqlcmd"] = server
+    globals()["wait_until"] = lambda check, *, tries, delay: any(check() for _ in range(tries))
+    real_stderr = sys.stderr
+    try:
+        assert _wait_mssql_captured("u", "dbo_t", "insert", 2003) and seen["polls"] >= seen["row_at"], "the wait returned before the row was in the change table"
+        seen.update(polls=0, row_at=10**6)
+        sys.stderr = io.StringIO()
+        assert not _wait_mssql_captured("u", "dbo_t", "insert", 2003) and "never captured insert id=2003" in sys.stderr.getvalue(), "a row that never lands is a False and a stderr line"
+        globals()["_sqlcmd"] = lambda *_a, **_k: Proc(["sqlcmd"], 1, "Msg 208, Invalid object name 'cdc.dbo_t_CT'.", "")
+        assert not _mssql_landed("u", "dbo_t", "insert", 2003), "an error answer is not a landed row"
+    finally:
+        globals().update(real)
+        sys.stderr = real_stderr
+
+
 def self_test() -> None:
     """A probe holds its engine lock from setup to cleanup; a differential run with no verdict FAILS, never SKIPs."""
     live = {"now": 0, "max": 0}
@@ -1556,4 +1555,13 @@ def self_test() -> None:
             globals()["note_invariant_violations"] = real_note
         got = {c.status.name for c in led.cells}
         assert got == {"FAIL"} and led.cells, f"exit {rc} with no verdict read {got}, not FAIL"
-    print("self-test ok: a cdc probe is serialised per engine; a differential run with no verdict fails")
+    assert MSSQL_PROBE_SQL.index("sp_cdc_enable_db") < MSSQL_PROBE_SQL.index("cdc.change_tables"), "CDC is enabled on the database before the first cdc.* read"
+    real_sqlcmd, real_stderr = globals()["_sqlcmd"], sys.stderr
+    globals()["_sqlcmd"] = lambda *_a, **_k: Proc(["sqlcmd"], 1, "Msg 208, Invalid object name 'cdc.change_tables'.", "")
+    sys.stderr = io.StringIO()
+    try:
+        assert _cdc_mssql("u", Path("w")) is None and "Msg 208" in sys.stderr.getvalue(), "a failed probe setup says why"
+    finally:
+        globals()["_sqlcmd"], sys.stderr = real_sqlcmd, real_stderr
+    _mssql_capture_self_test()
+    print("self-test ok: a cdc probe is serialised per engine; a differential run with no verdict fails; the capture wait ends on the row, not on the max LSN")

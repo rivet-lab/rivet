@@ -39,7 +39,7 @@ pub enum TextForm {
     Uuid36,
     /// Engine-produced: the source's RFC 8259 text, passed through.
     Json,
-    /// Engine-produced WKB in lowercase hex; the SRID travels separately.
+    /// Standard WKB in lowercase hex; a value with an SRID other than 0 is refused, not delivered without it.
     HexWkb,
     /// Rendered by [`hex_bytes`].
     HexBytes,
@@ -180,6 +180,11 @@ pub fn iso_timestamp_nanos(dt: NaiveDateTime, zoned: bool) -> String {
         dt.minute(),
         if zoned { "Z" } else { "" }
     )
+}
+
+/// True when a timestamp's source native label (`timestamp_tz(9)`, `timestamp_ltz(7)`) names a zoned type, whose nanosecond text carries the `Z` flag.
+pub fn is_zoned_timestamp_label(native: &str) -> bool {
+    native.starts_with("timestamp_tz") || native.starts_with("timestamp_ltz")
 }
 
 /// `[-]hh:mm:ss.ffffff` with as many hour digits as needed (at least two).
