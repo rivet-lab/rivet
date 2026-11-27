@@ -560,13 +560,13 @@ scenarios:
     cdc:            { test: mysql_cdc_flush_past_the_partition_budget_is_cut_and_every_part_notes_its_partitions }
 
   - id: type_policy_gate
-    what: "ADR-0038 CP6: the run applies `TypePolicy` to the export's column plan before any data is read (`types::plan_columns`) — lossy/unsupported columns warn by default and refuse under `rivet run --strict` with RIVET_TYPE_UNSAFE_MAPPING, the verdict `check --type-report --strict` gives; a mapping that carries a refusal (Oracle TIMESTAMP(7..9) undeclared, any column no Arrow type carries and no `columns:` entry declares, message `N column(s) need a `columns:` declaration`: `refuse_unmapped` in `probe_mappings`) is refused under any policy, with or without --strict, through the same `TypePolicy::validate`; a column the export's `format:` cannot write (CSV: Decimal256, nanosecond timestamps, lists; Parquet: a negative decimal scale) is refused with RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED through `format::refuse_unwritable_columns`, called by `plan_open_columns` and by both writers; `check`, `doctor` and `plan` reach the same refusals through `plan_run` before any run. Batch applies it once in `execute_resolved_plan` (`plan_open_columns`, on the open-forensics probe's mappings) BEFORE the strategy dispatch, so no batch runner can bypass it; a strict run whose open probe resolved nothing refuses rather than skip the check. CDC applies it per table in `run_capture` on `CdcSchemaResolver::resolve`'s result, before the sink reads an event."
-    single:         { test: oracle_batch_timestamp9_is_refused_until_declared_under_every_policy }
+    what: "ADR-0038 CP6: the run applies `TypePolicy` to the export's column plan before any data is read (`types::plan_columns`) — lossy/unsupported columns warn by default and refuse under `rivet run --strict` with RIVET_TYPE_UNSAFE_MAPPING, the verdict `check --type-report --strict` gives; a mapping that carries a refusal (any column no Arrow type carries and no `columns:` entry declares, message `N column(s) need a `columns:` declaration`: `refuse_unmapped` in `probe_mappings`) is refused under any policy, with or without --strict, through the same `TypePolicy::validate`; a column the export's `format:` cannot write (CSV: a nested list, Int8, Float16, a millisecond or second timestamp, a non-UUID fixed binary; Parquet: a negative decimal scale) is refused with RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED through `format::refuse_unwritable_columns`, called by `plan_open_columns` and by both writers; `check`, `doctor` and `plan` reach the same refusals through `plan_run` before any run. Batch applies it once in `execute_resolved_plan` (`plan_open_columns`, on the open-forensics probe's mappings) BEFORE the strategy dispatch, so no batch runner can bypass it; a strict run whose open probe resolved nothing refuses rather than skip the check. CDC applies it per table in `run_capture` on `CdcSchemaResolver::resolve`'s result, before the sink reads an event."
+    single:         { test: oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy }
     chunked:        { na: "shared seam: plan_open_columns runs in execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (execute_resolved_plan, before the dispatch)" }
     keyset:         { na: "shared seam (execute_resolved_plan, before the dispatch)" }
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
-    cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
+    cdc:            { test: oracle_cdc_timestamp9_is_delivered_as_text_undeclared_and_a_declared_timestamp_delivers_the_row }
 
   - id: narrowing_time_override_is_graded_by_the_result_column
     what: "a `timestamp` or `timestamp_tz` override over a result column finer than a microsecond (SQL Server datetime2(7) / datetimeoffset(7), Oracle TIMESTAMP(7..9) with or without a time zone) reads `lossy` in `check --type-report` and is refused by `run --strict` with RIVET_TYPE_UNSAFE_MAPPING; the verdict follows the column the query returns (an alias or a join stays lossy, a CAST to a coarser type stays exact, a describe that fails grades the column lossy with its cause); the default policy runs and delivers the microsecond truncation; `downgrade_narrowing_overrides` is the one grading, reached by `probe_mappings` (batch, check, type report) and by `CdcSchemaResolver::resolve` (CDC)"
@@ -606,7 +606,7 @@ scenarios:
 
   - id: check_plan_doctor_refuse_what_run_refuses
     what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
-    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql }
+    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql }
     chunked:        { na: "shared seam: plan_open_columns and probe_mappings run in plan_run/execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (plan_run, before the dispatch)" }
     keyset:         { na: "shared seam (plan_run, before the dispatch)" }
@@ -639,3 +639,12 @@ scenarios:
     keyset:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres }
     mongo_parallel: { na: "a Mongo export has no PostgreSQL column type" }
     cdc:            { test: postgres_batch_and_cdc_deliver_every_text_type_alike }
+
+  - id: a_refused_run_leaves_the_stored_baseline
+    what: "a run refused after the drift check (the quality gate, a coded stop of the CDC window or the load key) leaves the export's stored schema baseline as it found it, so the next run reads the drift again; only a run that ends clean stores the schema it observed (one seam: PendingBaselines, committed by job.rs and cdc_job.rs after the result is Ok)"
+    single:         { test: a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_pg }
+    chunked:        { test: a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_pg }
+    chunked_checkpoint: { na: "shared seam (check_and_persist holds the baseline in the summary; commit_baselines_of_a_clean_run stores it after the result), whichever runner wrote the parts" }
+    keyset:         { na: "shared seam (check_and_persist holds the baseline in the summary; commit_baselines_of_a_clean_run stores it after the result), whichever runner wrote the parts" }
+    mongo_parallel: { na: "a Mongo export's Arrow schema is the fixed {_id, document, meta} shape, so there is no column baseline to move" }
+    cdc:            { test: pg_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it }

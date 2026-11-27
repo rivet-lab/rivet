@@ -131,6 +131,46 @@ fn ledger(engine: &str) -> Ledger {
 /// `render.duck` for a type DuckDB cannot read exactly (Decimal256 reads as DOUBLE, ADR-0038 CP11).
 const ARROW: &str = "arrow";
 
+/// The ledger row `native` of `engine` as the column a `columns: {C: timestamp}` override delivers: Timestamp(µs), the digits past the sixth cut.
+#[cfg(feature = "oracle")]
+fn declared_timestamp_row(engine: &str, native: &str) -> Row {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
+    let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let r = doc["engines"][engine]["rows"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("engines.{engine}.rows is not a list"))
+        .iter()
+        .find(|r| r["native_type"].as_str() == Some(native))
+        .unwrap_or_else(|| panic!("engines.{engine}: no ledger row {native}"));
+    Row {
+        native: native.to_string(),
+        sample: r["sample"]
+            .as_sequence()
+            .expect("sample")
+            .iter()
+            .map(|v| v.as_str().expect("sample literal").to_string())
+            .collect(),
+        delivery: "Timestamp(µs)".to_string(),
+        render: Render {
+            source: Some(
+                "SUBSTR(TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9'), 1, 27)".to_string(),
+            ),
+            duck: Some("strftime({c}, '%Y-%m-%dT%H:%M:%S.%f')".to_string()),
+            server: None,
+            canon: Some("timestamp".to_string()),
+        },
+        known_defect: None,
+        today_delivery: None,
+        defect_samples: Vec::new(),
+        clickhouse: Some("Nullable(DateTime64(6, 'UTC'))".to_string()),
+        today_clickhouse: None,
+        clickhouse_defect: None,
+        clickhouse_defect_samples: Vec::new(),
+        refuses: false,
+    }
+}
+
 /// The ledger without the rows batch refuses today, and those rows.
 fn split_refused(lg: Ledger) -> (Ledger, Vec<Row>) {
     let (refused, rows) = lg.rows.into_iter().partition(|r| r.refuses);
@@ -2105,23 +2145,17 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let _serial = cross_process_serial("oracle_cdc");
     const DECLARED: &str = "TIMESTAMP(9)";
     let mut lg = ledger("oracle");
-    lg.rows
-        .iter_mut()
-        .filter(|r| r.native == DECLARED)
-        .for_each(|r| r.refuses = false);
+    let declared_at = lg.rows.len();
+    lg.rows.push(declared_timestamp_row("oracle", DECLARED));
     let t = crate::live_cdc_oracledb::cdc_table(
         "ledger_ora",
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
     );
-    let declared = format!(
-        "columns: {{{}}}",
-        lg.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.native == DECLARED)
-            .map(|(i, _)| format!("C{i}: timestamp"))
-            .collect::<Vec<_>>()
-            .join(", ")
+    let declared = format!("columns: {{C{declared_at}: timestamp}}");
+    assert_eq!(
+        lg.rows.iter().filter(|r| r.native == DECLARED).count(),
+        2,
+        "the ledger's undeclared {DECLARED} text column and the declared one are both graded"
     );
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")

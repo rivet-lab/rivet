@@ -319,6 +319,34 @@ fn a_per_test_budget_is_declared_once_in_the_default_profile() {
     );
 }
 
+#[test]
+fn every_live_suite_test_gets_the_pr_budget_unless_an_earlier_override_names_a_larger_one() {
+    let root = super::nonvacuity::repo_root();
+    let toml = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("nextest.toml");
+    let budgets: Vec<(String, u64)> = tables(&toml)
+        .into_iter()
+        .filter(|(h, b)| h == "[[profile.default.overrides]]" && b.contains("slow-timeout"))
+        .filter_map(|(_, b)| Some((b.lines().next()?.to_string(), budget_secs(&b)?)))
+        .collect();
+    let (last_filter, last_secs) = budgets
+        .last()
+        .expect("a default override sets slow-timeout");
+    assert_eq!(
+        last_filter, "filter = 'binary(live_suite)'",
+        "the last default override that sets slow-timeout is the one for the whole live suite: nextest takes the first \
+         match per setting, so a catch-all placed earlier would cap every larger budget below it"
+    );
+    let pr = tables(&toml)
+        .into_iter()
+        .find(|(h, _)| h == "[profile.pr]")
+        .and_then(|(_, b)| budget_secs(&b))
+        .expect("the pr profile budget");
+    assert!(
+        *last_secs >= pr,
+        "the hosted gate runs the default profile: a live test has {last_secs} s there and {pr} s under the pr profile"
+    );
+}
+
 /// Slowest measured run of one engine's no-debris matrix test, seconds (nightly gate 2026-11-13: Oracle 1178 s).
 const NO_DEBRIS_MATRIX_MEASURED_SECS: u64 = 1178;
 

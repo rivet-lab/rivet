@@ -1,19 +1,13 @@
 //! Source-database connection config: URL/structured fields, TLS, environment hints.
 
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer};
 
 use super::resolve::resolve_env_vars;
 use crate::secret::Secret;
 use crate::tuning::{TuningConfig, TuningProfile};
-
-/// Chars to percent-encode in a URL userinfo (user / password) component.
-const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
+use crate::url_text::USERINFO;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]

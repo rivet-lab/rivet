@@ -1121,16 +1121,17 @@ def sqlcmd(container: str) -> tuple[str, ...]:
 # A nextest status line: `<STATUS> [ 1.2s] (3/7) <binary> <test>`. The status is the whole
 # run of capitals before `[`, so `FAIL + LEAK` is read whole: matching `(PASS|LEAK) [`
 # found the `LEAK [` inside it and graded a failed, leaky test green.
-_NEXTEST_LINE = re.compile(r"^\s*([A-Z][A-Z +\d/-]*[A-Z\d])\s+\[[^\]]*\] \([^)]*\) \S+ (\S+)", re.M)
+_NEXTEST_LINE = re.compile(r"^\s*([A-Z][A-Z +\d/-]*[A-Z\d])\s+\[\s*([^\]]*?)\s*\] \([^)]*\) \S+ (\S+)", re.M)
+
+
+def _final_nextest_lines(out: str) -> list[tuple[str, str, str]]:
+    """Every final status line as (status, its bracket text, test); `SLOW` and `TRY n …` are not final."""
+    return [(s, t, n) for s, t, n in _NEXTEST_LINE.findall(out) if s != "SLOW" and not s.startswith("TRY ")]
 
 
 def nextest_outcomes(out: str) -> dict[str, str]:
     """Each test's final nextest status (`PASS`, `LEAK`, `FAIL`, `FAIL + LEAK`, `FLAKY a/b`, …); `SLOW` and `TRY n …` are not final."""
-    final: dict[str, str] = {}
-    for status, name in _NEXTEST_LINE.findall(out):
-        if status != "SLOW" and not status.startswith("TRY "):
-            final[name] = status
-    return final
+    return {name: status for status, _, name in _final_nextest_lines(out)}
 
 
 def nextest_started(out: str) -> int | None:
@@ -1156,7 +1157,7 @@ def _stand_health():
 
 
 def nextest_panics(out: str) -> dict[str, str]:
-    """Each test's first panic as one line: the rig oracle's own crash line wherever its message holds it, else the message's first line, or the rig oracle's first finding (its header names a per-run export)."""
+    """Each test's first panic as one line: the rig oracle's own crash line wherever its message holds it, else the message's first line, or the rig oracle's first finding; a red test with no panic gets its nextest status and time."""
     first: dict[str, str] = {}
     for name, head, finding in _NEXTEST_PANIC.findall(out):
         first.setdefault(name, (f"rig oracle: {finding}" if head.startswith("rig oracle: ") and finding else head).strip()[:300])
@@ -1165,6 +1166,9 @@ def nextest_panics(out: str) -> dict[str, str]:
         if name not in seen and (crash := _stand_health().ORACLE_PANIC.search(body)):
             first[name] = crash.group(0).strip()[:300]
         seen.add(name)
+    for name, (status, took) in {n: (s, t) for s, t, n in _final_nextest_lines(out)}.items():
+        if status not in ("PASS", "LEAK") and name not in first:
+            first[name] = f"nextest {status} [{took}], no panic line (the test process timed out or was killed)"
     return first
 
 
@@ -1212,6 +1216,13 @@ _NEXTEST_PANIC_SAMPLE = (
     "\n"
     "        FAIL [   0.200s] (1/1) rivet-cli::live_suite m::wrapped_finding\n"
     "    oracle error: a line after the test's stderr that is not its panic\n"
+    " TERMINATING [>240.000s] (───────) rivet-cli::live_suite m::timed_out\n"
+    "     TIMEOUT [ 240.019s] (7/9) rivet-cli::live_suite m::timed_out\n"
+    "  stdout ───\n"
+    "    running 1 test\n"
+    "    (test timed out)\n"
+    "     SIGSEGV [   1.500s] (8/9) rivet-cli::live_suite m::killed\n"
+    "     TIMEOUT [ 240.019s] (7/9) rivet-cli::live_suite m::timed_out\n"
 )
 
 
@@ -1245,7 +1256,10 @@ def nextest_grading_error() -> str | None:
     panics = nextest_panics(_NEXTEST_PANIC_SAMPLE)
     want_panics = {"m::plain_fail": "P-00: delivered 6 of 10", "m::oracle_fail": "rig oracle: COUNT(*): source 10, delivered 6",
                    "m::oracle_crash": "oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1 (an oracle bug, never a verdict)",
-                   "m::wrapped_finding": "the oracle's grade panicked; rivet's own verdict was: exit Some(0)"}
+                   "m::wrapped_finding": "the oracle's grade panicked; rivet's own verdict was: exit Some(0)",
+                   "m::next_test": "nextest FAIL [0.200s], no panic line (the test process timed out or was killed)",
+                   "m::timed_out": "nextest TIMEOUT [240.019s], no panic line (the test process timed out or was killed)",
+                   "m::killed": "nextest SIGSEGV [1.500s], no panic line (the test process timed out or was killed)"}
     if panics != want_panics:
         return f"read the panics {panics}, want {want_panics} (a known red is matched by this line)"
     return None

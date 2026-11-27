@@ -157,7 +157,8 @@ fn a_libpq_keyword_value_string_authenticates_and_its_password_reaches_no_sink()
         for (name, out) in &said {
             assert!(
                 out.status.success(),
-                "{form}: `{name}` must succeed:\n{}",
+                "{form}: `{name}` must succeed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
         }

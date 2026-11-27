@@ -278,7 +278,7 @@ fn table() -> Vec<Case> {
         case(
             "geometry",
             of(MYSQL_TYPE_GEOMETRY, BIN, 0, none, 0),
-            "unsupported(unknown) | - | unsupported | unsupported | reads bool,int16,int32,int64,uint64,float32,float64,decimal(18,2),decimal(50,2),date,time(microsecond),timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,binary,json,uuid,enum,interval,list<int32>,unsupported(x)",
+            "unsupported(geometry) | Utf8 | text:hex_wkb | logical_string | reads bool,int16,int32,int64,uint64,float32,float64,decimal(18,2),decimal(50,2),date,time(microsecond),timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,binary,json,uuid,enum,interval,list<int32>,unsupported(x)",
         ),
         case(
             "null",

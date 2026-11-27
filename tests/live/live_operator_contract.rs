@@ -1140,8 +1140,8 @@ fn second_run_beside(rig: Rig, n: usize) {
     rig.run_ok();
 }
 
-/// Mac report C: a TRUNCATE inside the stream is refused as `RIVET_SOURCE_CDC_TRUNCATED` (exit 5), every cycle; the re-baseline (after `first`, the engine's own step) delivers the source. Returns the refusal text.
-fn truncate_is_refused_by_code(mut s: CdcScenario, first: impl FnOnce(&mut Rig)) -> String {
+/// Mac report C: a TRUNCATE inside the stream is refused as `RIVET_SOURCE_CDC_TRUNCATED` (exit 5), every cycle; the re-baseline (after `first`, the engine's own step) delivers the source. Returns the walk.
+fn truncate_is_refused_by_code(mut s: CdcScenario, first: impl FnOnce(&mut Rig)) -> Walk {
     s.rig.run_ok();
     s.insert(1);
     s.settle();
@@ -3411,7 +3411,7 @@ fn a_nameless_backlog_is_refused_by_code_mysql() {
     );
 }
 
-/// A source value the output type cannot hold is refused as `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) on every run of a batch export; emptying the destination changes nothing; each remedy the text names (map the value in the export's `query:`, exclude the column) delivers the source.
+/// A source value the output type cannot hold is refused as `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) on every run of a batch export; emptying the destination changes nothing; each remedy the text names (map the value in the export's `query:`, declare the column `text`) delivers the source.
 fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
     e.alive();
     let (id, t) = (e.col("id"), e.col("t"));
@@ -3421,14 +3421,14 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
             "'2024-01-01 00:00:00'",
             "'infinity'",
             format!("CASE WHEN {t} = 'infinity' THEN '9999-12-31' ELSE {t} END"),
-            "maps the sentinels to a real bound",
+            text_remedy(&t),
         ),
         SqlEngine::Mysql => (
             "BIGINT",
             "1",
             "9007199254740993",
             format!("CAST({t} AS CHAR)"),
-            "Declare `decimal(20,0)` to keep the integer",
+            "Declare `decimal(20,0)` to keep the integer".to_string(),
         ),
         other => panic!("no unrepresentable-value fixture on {other:?}"),
     };
@@ -3463,7 +3463,7 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
                 }
             },
         ),
-        Remedy::new(cast_sentence, Then::DeliversTheSource, {
+        Remedy::new(&cast_sentence, Then::DeliversTheSource, {
             let (id, t, table) = (id.clone(), t.clone(), table.clone());
             move |r| {
                 if declared {
@@ -3486,16 +3486,9 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
         ));
     }
     if matches!(e, SqlEngine::Pg) {
-        remedies.push(Remedy::new(
-            "exclude the column",
-            Then::DeliversTheSource,
-            {
-                let (id, table) = (id.clone(), table.clone());
-                move |r| {
-                    r.rebuilt(|rig| rig.query(&format!("SELECT {id} FROM {table} ORDER BY {id}")))
-                }
-            },
-        ));
+        remedies.push(Remedy::new(&cast_sentence, Then::DeliversTheSource, |r| {
+            r.set_export_lines(&["columns: { t: text }"])
+        }));
     }
     rig.refuses_twice_and_walks_out(&["run"], &[], same, remedies);
 }

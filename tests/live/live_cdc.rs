@@ -2576,6 +2576,55 @@ fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
     assert_eq!(got, want, "each value is the server's own n::text");
 }
 
+/// A PostgreSQL numeric declared `text` on a CDC export reads the same string in the snapshot leg and the stream leg.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_a_numeric_declared_text_is_one_string_in_the_snapshot_and_the_stream() {
+    use postgres::NoTls;
+    let d = tempfile::tempdir().unwrap();
+    let tbl = unique_name("cdc_num_text");
+    let slot = unique_name("rivet_num_text_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC(18,2)); \
+         INSERT INTO {tbl} VALUES (1, 1.50), (2, 0), (3, 10)"
+    ))
+    .unwrap();
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rig = Rig::pg_cdc(&tbl, &slot)
+        .cdc_line("initial: snapshot")
+        .export_line("columns: { n: text }")
+        .dest_path(out.clone());
+
+    let snapshot = run_cells(&rig.run(), &out.join("snapshot"), "id", &["n"])
+        .unwrap_or_else(|e| panic!("the snapshot leg was refused: {e}"));
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (4, 2.50), (5, 0), (6, 10)"
+    ))
+    .unwrap();
+    let stream = run_cells(&rig.run(), &out, "id", &["n"])
+        .unwrap_or_else(|e| panic!("the stream leg was refused: {e}"));
+
+    let server: std::collections::BTreeMap<i64, String> = c
+        .query(&format!("SELECT id, n::text FROM {tbl} ORDER BY id"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let delivered: std::collections::BTreeMap<i64, String> = (1..=3)
+        .map(|id| (id, snapshot.get(&format!(":{id}")).cloned()))
+        .chain((4..=6).map(|id| (id, stream.get(&format!("insert:{id}")).cloned())))
+        .map(|(id, n)| (id, n.unwrap_or_else(|| format!("row {id} missing"))))
+        .collect();
+    assert_eq!(
+        delivered, server,
+        "a numeric declared text is the server's n::text in the snapshot leg and in the stream leg"
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
@@ -9140,7 +9189,7 @@ fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stre
     );
 }
 
-/// A PostgreSQL timestamp declared `text` gets one verdict from the batch export and the change stream. Open defect: batch refuses it, the stream writes chrono's text.
+/// A PostgreSQL timestamp declared `text` reads the same on the batch export and the change stream. Open defect: batch delivers the server's text, the stream writes chrono's text.
 #[test]
 #[ignore = "live+gate-only: requires docker compose postgres (wal_level=logical)"]
 fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream() {
@@ -9180,5 +9229,10 @@ fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stre
         "batch and the stream disagree on a timestamp declared text: batch {}, stream {}",
         word(&batched),
         word(&streamed)
+    );
+    assert_eq!(
+        streamed.as_ref().unwrap().get("insert:3"),
+        batched.as_ref().unwrap().get(":3"),
+        "a timestamp declared text reads differently on the stream and on batch"
     );
 }

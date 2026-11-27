@@ -49,6 +49,7 @@ acknowledgement); Oracle's and Mongo's is not.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import contextlib
 import datetime as dt
 import functools
 import itertools
@@ -211,7 +212,7 @@ def override_duck(declared: str) -> str | None:
 
 
 def norm_native(t: str | bytes) -> str:
-    """A declared source type in the ledger's spelling: upper case, single spaces, PostgreSQL's long names shortened (MySQL's catalog answers bytes)."""
+    """A declared source type in the ledger's spelling: upper case, single spaces, PostgreSQL's long names and MySQL's `geomcollection` spelled as the ledger does (MySQL's catalog answers bytes)."""
     t = t.decode() if isinstance(t, bytes) else t
     t = " ".join(t.upper().split()).replace(", ", ",")
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
@@ -220,6 +221,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIME(\(\d+\))? WITH TIME ZONE", r"TIMETZ\1", t)
     t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
+    t = re.sub(r"^GEOMCOLLECTION$", "GEOMETRYCOLLECTION", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
 
 
@@ -417,7 +419,7 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
 
     import pyarrow as pa
 
-    from .value_diff import oracle_result
+    from .value_diff import oracle_batches
 
     numeric: dict = {}
 
@@ -436,17 +438,29 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
         as_json = v is not None and (name in json_cols or isinstance(v, dict))
         return json_text(v) if as_json else v
 
-    names, rows = oracle_result(url, sql)
-    cols = list(zip(*[[cell(n, v) for n, v in zip(names, r)] for r in rows])) or [[] for _ in names]
+    def text(c: list) -> pa.Array:
+        return pa.array([None if v is None else (v.hex() if isinstance(v, bytes) else str(v)) for v in c])
 
     def column(c: list) -> pa.Array:
         try:
-            a = pa.array(c)
-        except (pa.ArrowInvalid, pa.ArrowTypeError):  # a column of mixed python types: compared as text
-            return pa.array([None if v is None else (v.hex() if isinstance(v, bytes) else str(v)) for v in c])
-        return pa.array(c, pa.string()) if pa.types.is_null(a.type) else a
+            return pa.array(c)
+        except (pa.ArrowInvalid, pa.ArrowTypeError):
+            return text(c)
 
-    ora.db.register("ora_src", pa.table({n: column(list(c)) for n, c in zip(names, cols)}))
+    def whole(chunks: list) -> pa.ChunkedArray:
+        typed = {a.type for a in chunks if not pa.types.is_null(a.type)}
+        if len(typed) > 1:
+            return pa.chunked_array([column([v for a in chunks for v in a.to_pylist()])])
+        target = next(iter(typed), pa.string())
+        return pa.chunked_array([a if a.type == target else a.cast(target) for a in chunks], target)
+
+    with oracle_batches(url, sql) as (names, batches):
+        chunks: list = [[] for _ in names]
+        for batch in batches:
+            for n, c, col in zip(names, chunks, zip(*batch)):
+                c.append(column([cell(n, v) for v in col]))
+    columns = {n: whole(c) if c else pa.chunked_array([], pa.string()) for n, c in zip(names, chunks)}
+    ora.db.register("ora_src", pa.table(columns))
     return numeric
 
 
@@ -543,7 +557,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
         overrides = spec.get("overrides") or {}
         exact_ns = exact_digit_columns(overrides, {c.upper() for c, t in declared.items() if t.startswith("TIMESTAMP")})
-        by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
+        micro = micro_digit_columns(overrides, declared)
+        by_col = {c: ORACLE_FF6_TRUNCATED if c in micro else None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
         zoned: frozenset = frozenset()
         if query:
@@ -625,10 +640,12 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             native = {by_lower[c.lower()]: native[by_lower[c.lower()]] for c in only if c.lower() in by_lower}
             key = key if set(key) <= set(native) else []
         zero = _mysql_zero_dated(ora, schema or db, leaf, native)
-        if not wide and not invisible and not partial and not zero and not only:
+        served = {c: renders[f"server:{n}"] for c, n in native.items() if f"server:{n}" in renders}
+        if not wide and not invisible and not partial and not zero and not only and not served:
             return f"my.{schema or db}.{leaf}", key, native
         cols = ", ".join(
-            f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
+            served[c].replace("{c}", f"`{c}`") + f" AS `{c}`" if c in served
+            else f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
             else f"IF(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}, NULL, `{c}`) AS `{c}`" if c in zero
             else f"`{c}`"
             for c in native
@@ -700,6 +717,19 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
 
 class Unreachable(Exception):
     """The source relation cannot be read for a stated reason: a named SKIP, never a pass."""
+
+
+class KeyAbsent(Exception):
+    """A key column the source holds is no column of what the run delivered: a finding about the delivery, never an oracle crash."""
+
+
+def require_key(ora, rel: str, key: list[str], what: str) -> None:
+    """Raise `KeyAbsent` when a `key` column is missing from `rel`, before any fold or join over the key reads it."""
+    have = {c.lower(): c for c, _ in _columns(ora, rel)}
+    gone = [k for k in key if k.lower() not in have]
+    if gone:
+        shown = ", ".join(c for c in have.values() if not c.startswith("__"))
+        raise KeyAbsent(f"KEY: key column(s) {', '.join(f'`{k}`' for k in gone)} of the source are absent from {what} (columns delivered: {shown or 'none'}): its rows cannot be folded per key")
 
 
 #: Engine messages that say the relation is not there (yet), the only source error a CDC stream may precede.
@@ -1424,6 +1454,8 @@ def _value_findings(
     # A CSV holds text: no DuckDB render applies to it; the source is rendered as the CSV writer documents its text.
     duck = {} if engine == "oracle" or fmt in ("csv", "ndjson") else {c: _render(r)["duck"] for c, r in row_of.items() if _render(r).get("duck")}
     canons = {c: _render(r)["canon"] for c, r in row_of.items() if _render(r).get("canon")}
+    if engine == "oracle":
+        canons.update(dict.fromkeys(micro_digit_columns(overrides or {}, native), "timestamp"))
     verbatim = frozenset(
         c for c, n in native.items()
         if (engine == "postgres" and n == "JSON") or (TEXT_NATIVE.match(n) and c not in duck and c not in canons and c not in numbers)
@@ -1531,6 +1563,7 @@ def grade(spec: dict) -> dict:
             extra += position_findings(ora, spec, "ev_new" if fresh else None, pos_order(engine), partial)
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE ev AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
+                require_key(ora, "ev", key, "the change stream")
                 ora.db.sql(
                     "CREATE OR REPLACE TEMP TABLE dst AS SELECT * EXCLUDE (__op, __pos, __seq, __ord, __rn) FROM "
                     f"(SELECT *, row_number() OVER (PARTITION BY {kl} ORDER BY __ord DESC, __seq DESC) AS __rn FROM ev) "
@@ -1582,6 +1615,8 @@ def grade(spec: dict) -> dict:
             ]
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE got AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
+                if key and (cumulative or spec.get("replay")):
+                    require_key(ora, "got", key, "the delivered parts")
                 if cumulative and key:
                     kl = ", ".join(_qi(k) for k in key)
                     extra += duplicate_deliveries(ora, "got", key, graded)
@@ -1655,6 +1690,8 @@ def _prep(engine: str, cdc: bool) -> tuple[dict, set[str], dict, dict]:
     }
     renders = {n: e for n, e in renders.items() if e}
     renders.update({f"source:{n}": _render(r)["source"] for n, r in rows.items() if _render(r).get("source")})
+    if engine == "mysql":
+        renders.update({f"server:{n}": _render(r)["server"] for n, r in rows.items() if r.get("delivery") in forms and _render(r).get("server")})
     # Two threads: every live test runs this, and a scanner opens a connection per thread.
     return rows, forms, renders, {"threads": 2, **SCANNER_SETTINGS.get(engine, {})}
 
@@ -1881,6 +1918,8 @@ def grade_load(spec: dict) -> dict:
                 ora.db.sql(f"CREATE OR REPLACE TEMP TABLE wh_all AS SELECT * FROM bigquery_query('bq', {_lit(sql)})")
         have = [c for c, _ in _columns(ora, "wh_all")]
         keep = ", ".join(_qi(c) for c in have if not c.startswith(WAREHOUSE_META)) or "1"
+        if key and (("__pos" in have or "_rivet_src" in have) or (spec.get("delta") and not cdc)):
+            require_key(ora, "wh_all", key, "the warehouse table")
         if ("__pos" in have or "_rivet_src" in have) and key:
             # A change log (or base ∪ buffer): its live state is the latest image per key, deletes removed.
             kl = ", ".join(_qi(k) for k in key)
@@ -2040,6 +2079,16 @@ def _peek_self_test() -> None:
         raise AssertionError("a missing slot must surface as itself")
 
 
+ORACLE_FF6_TRUNCATED = "SUBSTR(TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9'), 1, 27)"
+NANO_TIMESTAMP = re.compile(r"TIMESTAMP\([789]\)")
+
+
+def micro_digit_columns(overrides: dict, declared: dict) -> set[str]:
+    """The columns of `declared` (name to native type) over TIMESTAMP(7..9) that a `timestamp` override delivers at microseconds, graded as lossy by declaration: the source is read at FF6, the digits past it cut."""
+    by_upper = {c.upper(): t for c, t in overrides.items()}
+    return {c for c, n in declared.items() if override_duck(by_upper.get(c.upper()) or "") == "TIMESTAMP" and NANO_TIMESTAMP.fullmatch(n)}
+
+
 def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
     """The columns whose source is read with every fractional digit: a nanosecond override, or a text override over a timestamp column of `stamps` (upper-case names)."""
     return {
@@ -2050,6 +2099,9 @@ def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
 
 
 def _self_test() -> None:
+    types = {"T9": "TIMESTAMP(9)", "T7": "TIMESTAMP(7)", "T6": "TIMESTAMP(6)", "Z9": "TIMESTAMP(9) WITH TIME ZONE", "N": "NUMBER"}
+    assert micro_digit_columns({"t9": "timestamp", "T7": " Timestamp ", "T6": "timestamp", "Z9": "timestamp", "N": "timestamp"}, types) == {"T9", "T7"}, "only a `timestamp` over TIMESTAMP(7..9) is read at FF6"
+    assert not micro_digit_columns({"T9": "timestamp_ns", "T7": "text", "Z9": "timestamp_tz_ns", "T8": "date"}, types), "a nanosecond, text or date declaration keeps its own read"
     stamps = {"T9", "Z9"}
     assert exact_digit_columns({"T9": "text", "N": "text", "X": "timestamp_ns"}, stamps) == {"T9", "X"}
     for spelling in ("string", "varchar", "char", "bpchar", " text", "TEXT ", "timestamptz_ns", "timestamp_tz_ns", "Timestamp_NS"):
@@ -2264,13 +2316,25 @@ def _self_test() -> None:
     assert pin("DATETIME(6)"), "a DATETIME delivered as an instant is still a finding"
     seen: dict = {}
     ora_fake = type("O", (), {"db": type("D", (), {"register": staticmethod(lambda n, t: seen.update({n: t}))})()})()
-    real_result, value_diff.oracle_result = value_diff.oracle_result, lambda url, sql: (["Z", "N"], [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1))])
+    names = ["Z", "N", "I", "M", "E", "T", "W", "L"]
+    first = [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1), None, 1, None, dt.datetime(2024, 3, 1, 1), 1, [1])]
+    second = [(dt.datetime(2024, 3, 1, 1), dt.datetime(2024, 3, 1, 1), 5, "x", None, "x", 2.5, [2.5])]
+
+    @contextlib.contextmanager
+    def two_batches(url, sql):
+        yield names, iter([first, second])
+
+    real_batches, value_diff.oracle_batches = value_diff.oracle_batches, two_batches
     try:
         _oracle_register(ora_fake, "", "", zoned=frozenset({"Z"}))
     finally:
-        value_diff.oracle_result = real_result
+        value_diff.oracle_batches = real_batches
     tys = {f.name: str(f.type) for f in seen["ora_src"].schema}
-    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]"}, f"a zoned Oracle query column is registered as an instant: {tys}"
+    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]", "I": "int64", "M": "string", "E": "string", "T": "string", "W": "double", "L": "list<item: double>"}, f"batches are one column each, a null batch takes the type of the others, a width difference widens: {tys}"
+    got = seen["ora_src"]
+    assert got.column("M").to_pylist() == ["1", "x"] and got.column("I").to_pylist() == [None, 5], "a column of mixed python types is text across batches"
+    assert got.column("T").to_pylist() == ["2024-03-01 01:00:00", "x"], "incompatible batches are text as str() writes it, not as a cast of the first batch"
+    assert got.column("W").to_pylist() == [1.0, 2.5] and got.column("L").to_pylist() == [[1.0], [2.5]], "batches that differ only by number width widen as one pa.array did"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
     class Described:
         """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""
@@ -2365,7 +2429,9 @@ def _self_test() -> None:
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
+    _key_absent_self_test()
     _mssql_query_projection_self_test()
+    _mysql_server_render_self_test()
     print("rig_oracle self-test ok")
 
 
@@ -2461,6 +2527,13 @@ def _mssql_query_projection_self_test() -> None:
     assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
 
 
+def _mysql_server_render_self_test() -> None:
+    """No MySQL server-side render pads with LPAD, which cuts a value longer than its width (an 838-hour TIME lost a digit)."""
+    rows, _ = ledger("mysql", "batch")
+    served = {n: _render(r)["server"] for n, r in rows.items() if _render(r).get("server")}
+    assert served and not [n for n, e in served.items() if "LPAD(" in e.upper()], served
+
+
 def _folded_duplicate_self_test() -> None:
     """A key delivered twice in one run of a cumulative export is a finding naming the key and the manifest; one delivered by two runs is an update."""
     import tempfile
@@ -2502,6 +2575,63 @@ def _folded_duplicate_self_test() -> None:
         f"a key delivered twice in one run is a finding naming the key and the manifest: {twice['failures']}"
     reload = graded_run([[[1, 2]], [[2, 3]]])
     assert not reload["failures"], f"a key an earlier run delivered and a later run delivers again is an update, not a duplicate: {reload['failures']}"
+
+
+def _key_absent_self_test() -> None:
+    """A CDC stream and a cumulative export that deliver no column of the source's key are a finding naming the key, never an oracle crash; a stream that carries it is graded."""
+    import tempfile
+    from unittest import mock
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from . import duck
+
+    Session = _fake_session()
+
+    def delivered(root: str, sub: str, cols: dict, cdc: bool) -> tuple[str, list[str]]:
+        d = os.path.join(root, sub)
+        os.makedirs(d)
+        pq.write_table(pa.table(cols), os.path.join(d, "p.parquet"))
+        name = "manifest-0.json"
+        with open(os.path.join(d, name), "w") as fh:
+            json.dump({"status": "success", "run_id": "r0", "finished_at": "2026-11-24T00:00:00Z", "row_count": 3, "parts": [{"path": "p.parquet"}],
+                       "source": {"extraction": {"cursor_column": "id", "cursor_high": "3"}}}, fh)
+        return d, [name]
+
+    def graded(cols: dict, cdc: bool) -> dict:
+        with tempfile.TemporaryDirectory() as root:
+            out, names = delivered(root, "out", cols, cdc)
+            snap, snames = delivered(root, "snapshot", cols, cdc) if cdc else (os.path.join(root, "snapshot"), [])
+            spec = {"engine": "postgres", "mode": "cdc" if cdc else "batch", "cumulative": not cdc, "url": "postgresql://x/y", "table": "public.t", "key": [],
+                    "out_dir": out, "snapshot_dir": snap, "manifests": [] if cdc else names, "new_manifests": [] if cdc else names,
+                    "snapshot_manifests": snames, "new_snapshot_manifests": snames, "snapshot": cdc}
+            with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(3)):
+                return verdict_of(grade, spec)
+
+    for cdc in (True, False):
+        said = graded({"name": ["a", "b", "c"]}, cdc).get("failures") or []
+        assert len(said) == 1 and said[0].startswith("KEY: key column(s) `id`") and "columns delivered: name" in said[0], \
+            f"{'cdc' if cdc else 'batch'}: a delivery without the source's key column is one finding naming the column: {said}"
+    Session.loads, Session.types = [("public_t", "db.public_t", "success", 3, "2026-11-24T00:00:00Z")], []
+
+    def warehouse(sql: str, *_a, **_k) -> str:
+        """A ClickHouse answer: a catalog of `name`, `__pos` or the change log itself, with no `id` column."""
+        return "(SELECT 'name' AS name, 'String' AS type UNION ALL SELECT '__pos', 'String')" if "system.columns" in sql else "(SELECT 'a' AS name, 'p1' AS __pos)"
+
+    spec = {"engine": "postgres", "mode": "batch", "state": "", "url": "postgresql://x/y", "export": "t", "table": "public.t", "load": {"target": "clickhouse", "database": "db"}}
+    with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(3)), mock.patch(f"{__name__}._clickhouse", lambda _l, _p, sql: warehouse(sql)):
+        said = verdict_of(grade_load, spec).get("failures") or []
+    assert len(said) == 1 and said[0].startswith("KEY: key column(s) `id`") and "the warehouse table" in said[0], f"a change log without the key column is one finding: {said}"
+    kept = graded({"id": pa.array([1, 2, 3], pa.int64()), "name": ["a", "b", "c"]}, True)
+    assert not any(x.startswith("KEY:") for x in kept.get("failures", [])), f"a stream that carries the key is graded as before: {kept}"
+    assert verdict_of(lambda _s: (_ for _ in ()).throw(Unreachable("x")), {}) == {"skip": "x"}, "an unreachable source stays a named skip"
+    try:
+        verdict_of(lambda _s: 1 / 0, {})
+    except ZeroDivisionError:
+        pass
+    else:
+        raise AssertionError("a real crash stays a crash, never a verdict")
 
 
 def _zone_less_self_test() -> None:
@@ -2896,23 +3026,31 @@ def _ns_self_test() -> None:
     assert ours(full) == [("dur", 0, 0, "45296.123456789"), ("ts", "1700000000.123456789")], ours(full)
 
 
+def verdict_of(run, spec: dict) -> dict:
+    """The JSON verdict of `run(spec)`: a named skip for an unreachable source, a finding for an absent key column, a transient read re-run."""
+    for attempt in range(3):
+        try:
+            verdict = run(spec)
+            break
+        except Unreachable as e:
+            verdict = {"skip": str(e)}
+            break
+        except KeyAbsent as e:
+            verdict = {"failures": [str(e)], "notes": [], "facts": {}, "key": []}
+            break
+        except Exception as e:  # noqa: BLE001 — every read is idempotent, so a transient one is re-run
+            if attempt == 2 or not transient(e):
+                raise
+            time.sleep(2 * (attempt + 1))
+    if verdict.get("failures") and spec.get("known_defect"):
+        verdict["known_defect"] = known_defect_covers(spec["known_defect"], verdict["failures"])
+    return verdict
+
+
 if __name__ == "__main__":
     if sys.argv[1:] in (["grade"], ["grade-load"], ["grade-stdout"], ["image"], ["pairs"]):
         spec = json.load(sys.stdin)
         run = {"grade": grade, "grade-load": grade_load, "grade-stdout": grade_stdout, "image": take_image, "pairs": pairs}[sys.argv[1]]
-        for attempt in range(3):
-            try:
-                verdict = run(spec)
-                break
-            except Unreachable as e:
-                verdict = {"skip": str(e)}
-                break
-            except Exception as e:  # noqa: BLE001 — every read is idempotent, so a transient one is re-run
-                if attempt == 2 or not transient(e):
-                    raise
-                time.sleep(2 * (attempt + 1))
-        if verdict.get("failures") and spec.get("known_defect"):
-            verdict["known_defect"] = known_defect_covers(spec["known_defect"], verdict["failures"])
-        sys.stdout.write(json.dumps(verdict, default=str))
+        sys.stdout.write(json.dumps(verdict_of(run, spec), default=str))
     else:
         _self_test()

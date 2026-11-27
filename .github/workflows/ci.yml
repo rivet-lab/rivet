@@ -42,7 +42,7 @@ env:
   CARGO_TERM_COLOR: always
   MUTANTS_READY_LABEL: ready
   # How many in-diff mutants the `mutants-in-diff` budget can grade
-  # (~80s each at -j2 on a 2-core runner). ONE definition, read by both the job
+  # (measured 4.8-7.1 min each at -j2 on a 2-core runner). ONE definition, read by both the job
   # that spends the budget and the blocking `mutants-gate-sanity` job that
   # audits what the budget skipped — two copies of this number are two gates
   # that can disagree about whether a diff was graded.
@@ -436,10 +436,8 @@ jobs:
             say cache miss
             rm -rf .mutants-cache
           fi
-          # Up to eight runners, at least ~10 mutants each: every shard pays a build and a
-          # baseline (~6 min), so a small diff on eight runners buys nothing.
+          # Shards = ceil(N / 10).
           SHARD_N=$(( (N + 9) / 10 ))
-          SHARD_N=$(( SHARD_N > 8 ? 8 : SHARD_N ))
           say shard_n "$SHARD_N"
           if [ "$CACHE" = miss ] && [ "$SHARD_N" -gt 0 ] && [ "$READY" != "true" ]; then
             say held true

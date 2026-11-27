@@ -1,0 +1,1 @@
+- **Harness only: every live-suite test gets the pr profile's 1200 s nextest budget in the default profile the hosted gate runs.** No behaviour change; a load-stretched cell is no longer cut at 240 s one test name at a time.
