@@ -19,9 +19,22 @@ impl Secret {
         crate::redact::mask_value_in_output(&self.0);
     }
 
-    /// A secret holding `value`.
+    /// A secret holding `value`, registered with the shared redactor so it is masked wherever it reaches output (ADR-0040 I1: by construction, not per call site).
     pub fn new(value: impl Into<String>) -> Self {
-        Self(Zeroizing::new(value.into()))
+        Self::registered(Zeroizing::new(value.into()))
+    }
+
+    /// `value` as a secret, registered for masking unless it holds `://` or `=` with a space or `;`: the URL and keyword scanners mask the password inside a connection string, and a service-account JSON read as one value is not masked as a whole.
+    fn registered(value: Zeroizing<String>) -> Self {
+        let secret = Self(value);
+        if seeded!(
+            "secret-value-not-registered",
+            false,
+            !is_connection_string(&secret.0)
+        ) {
+            secret.mask_in_output();
+        }
+        secret
     }
 
     /// The raw text: call it at the connect or request site that sends it, nowhere else.
@@ -33,6 +46,11 @@ impl Secret {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// A URL (`scheme://…`) or a keyword/value DSN (`host=h password=p`, `Server=h;Password=p`).
+fn is_connection_string(value: &str) -> bool {
+    value.contains("://") || (value.contains('=') && value.contains([' ', ';']))
 }
 
 impl fmt::Display for Secret {
@@ -75,7 +93,7 @@ impl std::str::FromStr for Secret {
 
 impl From<Zeroizing<String>> for Secret {
     fn from(value: Zeroizing<String>) -> Self {
-        Self(value)
+        Self::registered(value)
     }
 }
 
@@ -131,6 +149,71 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Secret::json_schema(&mut generator)).unwrap(),
             serde_json::json!({"type": "string", "writeOnly": true})
+        );
+    }
+
+    /// A token that reaches output inside text rivet does not control (a warehouse echoing the Authorization header in its 401 body) is masked because the Secret holding it registered itself.
+    #[test]
+    fn a_secret_is_masked_in_output_by_construction() {
+        let token = "ya29.secret-is-masked-by-construction-0123456789";
+        let _held = Secret::new(token);
+        let echoed = anyhow::anyhow!("HTTP 401: Invalid credentials: Bearer {token}");
+        let shown = crate::redact::redact_error(&echoed);
+        assert!(!shown.contains(token), "{shown}");
+        assert!(shown.contains("Invalid credentials: Bearer ***"), "{shown}");
+        let _from_zeroizing: Secret =
+            Zeroizing::new("zeroized-token-0123456789".to_string()).into();
+        assert!(
+            !crate::redact::redact_secrets("got zeroized-token-0123456789")
+                .contains("zeroized-token-0123456789")
+        );
+        let padded = "dG9rZW4tYnktY29uc3RydWN0aW9uLWJhc2U2NA==";
+        let _padded = Secret::new(padded);
+        assert!(
+            !crate::redact::redact_secrets(&format!("got {padded}")).contains(padded),
+            "a base64 token ending in `=` is a credential, not a keyword DSN"
+        );
+        let url = "postgresql://reader@db.internal:5432/app-by-construction";
+        let _plain = Secret::new(url);
+        assert_eq!(
+            crate::redact::redact_secrets(url),
+            url,
+            "a URL is left to the URL scanner"
+        );
+        let dsn = "host=h user=u password=DsnPassword1146 dbname=by-construction";
+        let _dsn = Secret::new(dsn);
+        assert_eq!(
+            crate::redact::redact_secrets(dsn),
+            "host=h user=u password=*** dbname=by-construction",
+            "a keyword DSN is left to the keyword scanner"
+        );
+    }
+
+    /// A service-account `private_key` is its own secret: masked by value unless its PEM holds `=` with a space, as the changelog states.
+    #[test]
+    fn a_pem_private_key_is_masked_by_value_unless_it_holds_padding() {
+        let bare = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\n-----END PRIVATE KEY-----\n";
+        let _held: Secret = serde_json::from_str(&serde_json::to_string(bare).unwrap()).unwrap();
+        let shown = crate::redact::redact_secrets(&format!("jwt failed for {bare}"));
+        assert_eq!(shown, "jwt failed for ***");
+        let padded = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAQ==\n-----END PRIVATE KEY-----\n";
+        let _padded = Secret::new(padded);
+        let echoed = format!("jwt failed for {padded}");
+        assert_eq!(crate::redact::redact_secrets(&echoed), echoed);
+    }
+
+    /// A credential that equals a word the scanners key on is not registered: masking it as free text would defeat the keyword scanner on `password=<other secret>` and rewrite the remedy hints that name `password_env`.
+    #[test]
+    fn a_secret_equal_to_a_scanner_keyword_does_not_rewrite_rivets_own_text() {
+        for word in ["password", "PASSWORD", "passwd", "pwd", "Pwd"] {
+            let _held = Secret::new(word);
+        }
+        let hint = "source: env var 'DB_PW' is not set (referenced by password_env).";
+        assert_eq!(crate::redact::redact_secrets(hint), hint);
+        let dsn = "host=h user=u password=LeakCheck1146x dbname=d";
+        assert_eq!(
+            crate::redact::redact_secrets(dsn),
+            "host=h user=u password=*** dbname=d"
         );
     }
 

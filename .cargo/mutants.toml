@@ -999,4 +999,6 @@ exclude_re = [
     "replace match guard is_oid_array\\(.*\\) with (true|false) in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
     # 2026-11-21: read_utf8_list reads a live tokio_postgres::Row, unkillable under --lib --bins; its choice of reader lives in utf8_list_read, unit-tested; RED by hand under every whole-body stub (None, vec![None], "xyzzy", empty string, empty vec) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements; closes with an offline Postgres row fake.
     "replace read_utf8_list ->",
+    # 2026-11-25: mask_spans is compiled only with feature `seeded`, so both stubs are the code as shipped in the graded build; with the feature on it runs only under the `registered-anchor-masked` switch, which dev/seeded/recall.py grades (CAUGHT); closes never.
+    "replace mask_spans -> String with ",
 ]

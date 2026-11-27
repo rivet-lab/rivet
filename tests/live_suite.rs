@@ -254,6 +254,8 @@ mod live_mysql_resume;
 mod live_mysql_retry_and_faults;
 #[path = "live/live_mysql_schema_drift.rs"]
 mod live_mysql_schema_drift;
+#[path = "live/live_mysql_spatial.rs"]
+mod live_mysql_spatial;
 #[path = "live/live_narrowing_override.rs"]
 mod live_narrowing_override;
 #[cfg(feature = "oracle")]
