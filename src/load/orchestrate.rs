@@ -949,7 +949,7 @@ fn up_to_date_label(mode: load::plan::LoadMode) -> &'static str {
     }
 }
 
-/// The checks a plan's staged parts must pass for its warehouse before any write: the partition budget, then the value ranges.
+/// The checks a plan's staged parts must pass for its warehouse before any write: the partition budget, then the value ranges and NULL lists.
 fn parts_fit_target(
     store: &crate::destination::gcs::GcsStore,
     plan: &load::plan::LoadPlan,
@@ -957,7 +957,7 @@ fn parts_fit_target(
     uris: &[String],
 ) -> Result<()> {
     partition_budget_ok(store, plan, budgeted)?;
-    load::target_range::refuse_parts_outside_ranges(store, plan, uris)
+    load::target_range::refuse_unholdable_parts(store, plan, uris)
 }
 
 /// The shared load envelope: open the store, build the loader, reconcile via the ledger, then run + record.
@@ -2679,6 +2679,119 @@ mod load_ledger_tests {
                     ),
                     (false, Ok(_)) => {}
                     (_, other) => panic!("{mode:?} {days}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// A staged part holding a NULL list is refused by code before the warehouse write, in every mode; an empty list, a list holding a NULL element, a column the plan does not declare a list and a change log's delete row reach it.
+    #[test]
+    fn a_null_list_part_is_refused_before_the_warehouse_write() {
+        use crate::types::target::{BqType, TargetColumnSpec, TargetStatus};
+        use arrow::array::{ArrayRef, Int32Builder, ListBuilder, StringArray};
+        let part = |tags: &[Option<Vec<Option<i32>>>], ops: Option<&[&str]>| {
+            let mut b = ListBuilder::new(Int32Builder::new());
+            for t in tags {
+                match t {
+                    Some(items) => {
+                        items.iter().for_each(|i| b.values().append_option(*i));
+                        b.append(true);
+                    }
+                    None => b.append(false),
+                }
+            }
+            let mut cols = vec![("tags", std::sync::Arc::new(b.finish()) as ArrayRef)];
+            if let Some(ops) = ops {
+                cols.push(("__op", std::sync::Arc::new(StringArray::from(ops.to_vec()))));
+            }
+            let batch = arrow::record_batch::RecordBatch::try_from_iter(cols).unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            buf
+        };
+        let list_spec = TargetColumnSpec {
+            column_name: "tags".into(),
+            target_type: BqType::Array(Box::new(BqType::Int64)).into(),
+            autoload_type: BqType::Array(Box::new(BqType::Int64)).into(),
+            status: TargetStatus::Ok,
+            note: None,
+            cast_sql: None,
+        };
+        let one = || Some(vec![Some(1)]);
+        let cases: [(&str, bool, Vec<u8>, bool); 6] = [
+            ("null", true, part(&[one(), None], None), true),
+            ("empty", true, part(&[one(), Some(vec![])], None), false),
+            (
+                "null element",
+                true,
+                part(&[Some(vec![Some(1), None])], None),
+                false,
+            ),
+            ("undeclared", false, part(&[None], None), false),
+            (
+                "delete row",
+                true,
+                part(&[one(), None], Some(&["insert", "delete"])),
+                false,
+            ),
+            (
+                "update row",
+                true,
+                part(&[one(), None], Some(&["insert", "update"])),
+                true,
+            ),
+        ];
+        for mode in [load::plan::LoadMode::Cdc, load::plan::LoadMode::Full] {
+            for (name, declared, bytes, refused) in &cases {
+                let delete_row_in_a_full_load =
+                    *name == "delete row" && mode == load::plan::LoadMode::Full;
+                let refused = *refused || delete_row_in_a_full_load;
+                let dir = tempfile::tempdir().expect("a temp prefix");
+                let state = StateStore::open_in_memory().unwrap();
+                let mut plan = cdc_plan(&dir, "orders_lists");
+                plan.mode = mode;
+                plan.specs = if *declared {
+                    vec![list_spec.clone()]
+                } else {
+                    vec![]
+                };
+                let m = super::live_only_decisions::success_manifest("r-l", "part-0.parquet");
+                super::live_only_decisions::write_at(
+                    &dir,
+                    "p/manifest-r-l.json",
+                    &serde_json::to_vec(&m).unwrap(),
+                );
+                super::live_only_decisions::write_at(&dir, "p/part-0.parquet", bytes);
+                let reached = std::cell::Cell::new(false);
+                let mut job = cdc_job(&dir, &state, &plan);
+                job.mode = mode;
+                let out = execute_load(
+                    job,
+                    |_| {},
+                    |_, _, _, _| -> Result<(u64, ())> {
+                        reached.set(true);
+                        Ok((1, ()))
+                    },
+                    |_, _| {},
+                );
+                assert_eq!(reached.get(), !refused, "{name} {mode:?}: {out:?}");
+                match (refused, out) {
+                    (true, Err(e)) => {
+                        assert_eq!(
+                            crate::error::error_code(&e),
+                            Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                            "{e:#}"
+                        );
+                        assert!(
+                            format!("{e:#}").contains("column `tags` holds a NULL list"),
+                            "{e:#}"
+                        );
+                    }
+                    (false, Ok(_)) => {}
+                    (_, other) => panic!("{name} {mode:?}: {other:?}"),
                 }
             }
         }
