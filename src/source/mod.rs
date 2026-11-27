@@ -1465,7 +1465,7 @@ mod json_declared_tests {
             Some("\"\u{e9}\u{65e5}\""),
             None,
         ];
-        run(&batch(true, DataType::Utf8, &ok), &["v"]).unwrap();
+        assert!(run(&batch(true, DataType::Utf8, &ok), &["v"]).is_ok());
     }
 
     #[test]
