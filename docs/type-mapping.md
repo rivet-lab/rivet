@@ -59,7 +59,7 @@ stays per engine, in the engine's own decoder
 
 Types an engine carries alone stay in its own table: PostgreSQL `oid`, `timetz`, enums,
 arrays and the types it does not map; MySQL `bigint unsigned`, `bit`, `year`, `enum`,
-`set`; SQL Server `money`, `smallmoney`, `sql_variant`, CLR types. Within a shared
+`set`; SQL Server `money`, `smallmoney`, `sql_variant`, `xml`, CLR types. Within a shared
 kind the engine keeps its own reading: MySQL `time` beyond 24 hours and negative,
 SQL Server `time(7)` precision, Oracle interval units, PostgreSQL `interval` months,
 days and microseconds. MongoDB has no native-type
@@ -435,6 +435,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `sql_variant` | `string` | `Utf8` | the value as text | the base value rendered as text: integers and exact decimals as digits, temporals as ISO (`CONVERT(…, 121)`), uuid upper-case, bytes lowercase hex, floats as the shortest round-trip form | live (batch + CDC) |
 | `hierarchyid` (CLR UDT) | `string` | `Utf8` | lowercase hex (`rivet.text_form: hex_bytes`) | the serialized bytes as lowercase hex, equal to `CAST(col AS varbinary(max))`, batch and CDC. The hex is not the `/1/2/` path text: select `c.ToString()` in the export's `query:` for that. It is delivered as text, so a hierarchyid column is refused as a `chunk_by_key` keyset key with `RIVET_PLAN_CHUNK_KEY_UNUSABLE` before the first write (an earlier release admitted it: it worked on a table smaller than `chunk_size` and failed once the table reached `chunk_size`); range-chunk an integer column or use `mode: full`. BigQuery recovers the bytes with `FROM_HEX(x)`, ClickHouse with `unhex(x)` | live (batch + CDC) |
 | `geometry` / `geography` (CLR UDTs) | `string` | `Utf8` | lowercase hex (`rivet.text_form: hex_bytes`) | the serialized UDT bytes as lowercase hex, equal to `CAST(col AS varbinary(max))`, batch and CDC; the SRID is inside the bytes. This is Microsoft's CLR serialization, not WKB, so a warehouse cannot read it as a geometry; a warehouse recovers the bytes: BigQuery `FROM_HEX(x)`, Snowflake `TO_BINARY(x, 'HEX')`, ClickHouse `unhex(x)`. For WKB, select it in the export's `query:`: `c.STAsBinary()` and `c.STSrid` (`STAsBinary()` drops Z and M, `c.AsBinaryZM()` keeps them; a curve type comes out with the ISO curve code, `c.STCurveToLine().STAsBinary()` gives plain WKB). A `columns: {c: text}` declaration delivers the same hex and carries no label | live (batch + CDC) |
+| `xml` | `string` | `Utf8` | the document as text | the server's own text, byte for byte equal to `CAST(col AS nvarchar(max))`: an XML declaration is dropped as the server drops it, CDATA arrives as escaped text, an attribute quote as `&quot;`, comments, processing instructions and `xml:space="preserve"` text as stored, an `xml` fragment as is, no byte-order mark; batch, the CDC baseline and the CDC stream deliver the same text; before 2026-11-25 the type was refused with `RIVET_TYPE_UNSAFE_MAPPING` (batch) or `SOURCE_CDC_CELL_UNSUPPORTED` (CDC) | live `live_mssql_xml` |
 | nullable / all-null | — | preserved | empty cells | | live matrix |
 
 Unmapped SQL Server types resolve to `Unsupported` and fail loudly at schema

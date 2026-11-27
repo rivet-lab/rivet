@@ -1217,9 +1217,8 @@ mod tests {
 
     #[test]
     fn a_valued_cell_without_a_decoder_is_refused_not_nulled() {
-        use std::borrow::Cow;
-        let xml = ColumnData::Xml(Some(Cow::Owned(tiberius::xml::XmlData::new("<a/>"))));
-        let err = cell_fallthrough(&xml).expect_err("a valued xml cell must not become NULL");
+        let valued = ColumnData::I32(Some(7));
+        let err = cell_fallthrough(&valued).expect_err("a valued cell must not become NULL");
         assert_eq!(crate::error::classify_exit(&err), 5, "{err:#}");
         for null in [
             ColumnData::Xml(None),
