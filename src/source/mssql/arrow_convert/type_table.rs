@@ -140,27 +140,27 @@ fn table() -> Vec<Case> {
         case(
             "datetime",
             of(ColumnType::Datetime, None),
-            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC)",
+            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string",
         ),
         case(
             "datetime4 (smalldatetime)",
             of(ColumnType::Datetime4, None),
-            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC)",
+            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string",
         ),
         case(
             "datetimen",
             of(ColumnType::Datetimen, None),
-            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC)",
+            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string",
         ),
         case(
             "datetime2 (no catalog hint)",
             of(ColumnType::Datetime2, None),
-            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC)",
+            "timestamp(microsecond) | Timestamp(µs) | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string",
         ),
         case(
             "datetimeoffsetn (datetimeoffset)",
             of(ColumnType::DatetimeOffsetn, None),
-            "timestamp_tz(microsecond,UTC) | Timestamp(µs, \"UTC\") | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC)",
+            "timestamp_tz(microsecond,UTC) | Timestamp(µs, \"UTC\") | native | exact | reads timestamp(microsecond),timestamp_tz(microsecond,UTC),string",
         ),
         case(
             "bigvarbin (varbinary)",

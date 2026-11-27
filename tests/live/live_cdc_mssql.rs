@@ -2812,10 +2812,10 @@ fn mssql_datetime2_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc() {
     );
 }
 
-/// SQL Server refuses `text` over a datetime2 column by one code on the batch export and the change stream.
+/// A datetime2 declared `text` is the server's own text on the batch export and is refused by code on the pending baseline of a change stream.
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
-fn mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc() {
+fn mssql_a_datetime2_declared_text_is_delivered_by_batch_and_refused_on_a_cdc_baseline() {
     let _serial = cross_process_serial("mssql_cdc");
     let table = unique_name("rivet_cdc_tx");
     let ci = format!("dbo_{table}");
@@ -2838,16 +2838,23 @@ fn mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc() {
         .cdc("until_current: true")
         .export_line(declared);
     let streamed = run_cells(&rig.run(), &rig.out_dir(), "id", &["t7"]);
+    assert_eq!(
+        streamed,
+        Err("refused[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1]".to_string()),
+        "a datetime2 declared text on a pending baseline is refused by code"
+    );
     let batch_out = tempfile::tempdir().unwrap();
     let batch = Rig::mssql_batch(&table)
         .source_url(MSSQL_CDC_URL)
         .dest_path(batch_out.path().to_path_buf())
         .export_line(declared);
     let batched = run_cells(&batch.run(), batch_out.path(), "id", &["t7"]);
-    assert_eq!(batched, streamed, "one verdict on both legs");
     assert_eq!(
         batched,
-        Err("refused[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1]".to_string()),
-        "a datetime2 declared text is refused by code"
+        Ok(std::collections::BTreeMap::from([(
+            ":1".to_string(),
+            "2000-01-01 00:00:00.5000000".to_string()
+        )])),
+        "batch delivers the server's own text"
     );
 }
