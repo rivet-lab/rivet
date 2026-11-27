@@ -343,6 +343,8 @@ exports:
 
 Rivet exports the WKT text as a `Utf8` (string) column. Downstream tools (DuckDB, GeoPandas, QGIS) can reconstruct geometry from WKT.
 
+MySQL spatial columns (`GEOMETRY`, `POINT`, `LINESTRING`, `POLYGON`, `MULTIPOINT`, `MULTILINESTRING`, `MULTIPOLYGON`, `GEOMETRYCOLLECTION`) need no workaround: rivet delivers them as a `Utf8` column holding the lowercase hex of the standard WKB, in batch and CDC. A value with an SRID other than 0 is refused with `RIVET_SOURCE_VALUE_UNREPRESENTABLE`; declare the column `binary` in `columns:`, or select `ST_AsBinary(col)` and `ST_SRID(col)` in the query. See [type-mapping.md](../type-mapping.md).
+
 ---
 
 ### Mode-specific fields

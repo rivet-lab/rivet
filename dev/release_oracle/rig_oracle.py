@@ -212,7 +212,7 @@ def override_duck(declared: str) -> str | None:
 
 
 def norm_native(t: str | bytes) -> str:
-    """A declared source type in the ledger's spelling: upper case, single spaces, PostgreSQL's long names shortened (MySQL's catalog answers bytes)."""
+    """A declared source type in the ledger's spelling: upper case, single spaces, PostgreSQL's long names and MySQL's `geomcollection` spelled as the ledger does (MySQL's catalog answers bytes)."""
     t = t.decode() if isinstance(t, bytes) else t
     t = " ".join(t.upper().split()).replace(", ", ",")
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
@@ -221,6 +221,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIME(\(\d+\))? WITH TIME ZONE", r"TIMETZ\1", t)
     t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
+    t = re.sub(r"^GEOMCOLLECTION$", "GEOMETRYCOLLECTION", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
 
 
@@ -639,10 +640,12 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             native = {by_lower[c.lower()]: native[by_lower[c.lower()]] for c in only if c.lower() in by_lower}
             key = key if set(key) <= set(native) else []
         zero = _mysql_zero_dated(ora, schema or db, leaf, native)
-        if not wide and not invisible and not partial and not zero and not only:
+        served = {c: renders[f"server:{n}"] for c, n in native.items() if f"server:{n}" in renders}
+        if not wide and not invisible and not partial and not zero and not only and not served:
             return f"my.{schema or db}.{leaf}", key, native
         cols = ", ".join(
-            f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
+            served[c].replace("{c}", f"`{c}`") + f" AS `{c}`" if c in served
+            else f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
             else f"IF(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}, NULL, `{c}`) AS `{c}`" if c in zero
             else f"`{c}`"
             for c in native
@@ -1687,6 +1690,8 @@ def _prep(engine: str, cdc: bool) -> tuple[dict, set[str], dict, dict]:
     }
     renders = {n: e for n, e in renders.items() if e}
     renders.update({f"source:{n}": _render(r)["source"] for n, r in rows.items() if _render(r).get("source")})
+    if engine == "mysql":
+        renders.update({f"server:{n}": _render(r)["server"] for n, r in rows.items() if r.get("delivery") in forms and _render(r).get("server")})
     # Two threads: every live test runs this, and a scanner opens a connection per thread.
     return rows, forms, renders, {"threads": 2, **SCANNER_SETTINGS.get(engine, {})}
 
@@ -2426,6 +2431,7 @@ def _self_test() -> None:
     _folded_duplicate_self_test()
     _key_absent_self_test()
     _mssql_query_projection_self_test()
+    _mysql_server_render_self_test()
     print("rig_oracle self-test ok")
 
 
@@ -2519,6 +2525,13 @@ def _mssql_query_projection_self_test() -> None:
     assert sql == "SELECT [id], CONVERT(varchar(max), [t2], 121) AS [t2], [o]]k] FROM (SELECT id, t2 FROM t) AS rivet_q", sql
     assert drawn == {"t2": "DATETIME2"}, drawn
     assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
+
+
+def _mysql_server_render_self_test() -> None:
+    """No MySQL server-side render pads with LPAD, which cuts a value longer than its width (an 838-hour TIME lost a digit)."""
+    rows, _ = ledger("mysql", "batch")
+    served = {n: _render(r)["server"] for n, r in rows.items() if _render(r).get("server")}
+    assert served and not [n for n, e in served.items() if "LPAD(" in e.upper()], served
 
 
 def _folded_duplicate_self_test() -> None:

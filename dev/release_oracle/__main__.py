@@ -69,6 +69,7 @@ from . import (
     property_no_silent_null_grants,
     property_no_silent_null_cdc,
     property_no_silent_null_load,
+    property_no_silent_null_matrix_only,
     cloud_legs,
     partner_shape,
     perf,
@@ -968,6 +969,9 @@ def _matrix_exit_code_self_test() -> None:
         "property_no_silent_null_cdc": (property_no_silent_null_cdc, "run_engine", lambda r: [r], lambda m: m.main()),
         "property_no_silent_null_load": (property_no_silent_null_load, "run_engine", lambda r: ([r], []), lambda m: m.main()),
         "property_no_silent_null_grants": (property_no_silent_null_grants, "run_grants", lambda r: [r], lambda m: m.main()),
+        "property_no_silent_null_matrix_only": (
+            property_no_silent_null_matrix_only, "run_engines",
+            lambda r: [property_no_silent_null_matrix_only.label([r])], lambda m: m.main()),
         "property_refusal_names_true_cause": (
             refusal, "run_offline",
             lambda r: [f"{refusal.MATRIX} cause/X/- {'PASS' if not r.klass else 'RED' if r.klass != nsn.NOT_GRADED else 'NOT_GRADED'} x"],
@@ -1036,6 +1040,7 @@ def _stages_self_test() -> None:
     property_no_silent_null_grants.self_test()
     property_no_silent_null_cdc.self_test()
     property_no_silent_null_load.self_test()
+    property_no_silent_null_matrix_only.self_test()
     cloud_legs.self_test()
     _matrix_exit_code_self_test()
     doc = {
@@ -1492,6 +1497,13 @@ def _self_test() -> int:
     assert measured_harm("mssql://h", {"again": 900, "kept": 100}, {"again": 120, "kept": 130}, {}) == {
         "mssql_logical_reads": 150}, "a statement compiled again between the readings counts by its new total"
     assert measured_harm("mssql://h", None, {"new": 7}, {"mssql_logical_reads": 7}) is None
+    mssql = lambda *reads: [Sample(True, 0.2, 0.02, 50 * 1024 * 1024, {"mssql_logical_reads": r, "pg_tup_returned": r}) for r in reads]
+    prev_reps, cur_reps = _best(mssql(617, 1083, 1080)), _best(mssql(1150, 1153, 1160))
+    assert prev_reps.harm == {"mssql_logical_reads": 1080, "pg_tup_returned": 617}, "plan-cache reads take the median, server-wide counters the minimum"
+    assert perf_verdict("mssql", prev_reps, cur_reps) == [], "one lossy-low rep of the previous release does not fail the same work"
+    assert perf_verdict("mssql", _best(mssql(1083, 617, 1080)), _best(mssql(1150, 2074, 1160))) == [], "a compile spike on one rep does not fail it either"
+    assert perf_verdict("mssql", _best(mssql(1083, 1080, 1081)), _best(mssql(4000, 4100, 3900))) == [
+        "mssql_logical_reads 4000 > 1081×1.25+200"], "reads that grew on every rep still fail"
     assert measured_harm("postgresql://h", {"pg_tup_returned": 5}, {"pg_tup_returned": 9}, {}) == {
         "pg_tup_returned": 4}
     assert measured_harm("", None, None, {"mongo_docs_scanned": 3}) == {"mongo_docs_scanned": 3}

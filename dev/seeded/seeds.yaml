@@ -1866,6 +1866,103 @@ seeds:
         na: "a MongoDB document has no TIME type; the MySQL TIME mapping does not run"
       oracle:
         na: "Oracle has no TIME type; the MySQL TIME mapping does not run"
+  - name: mysql-spatial-srid-dropped
+    class: "a MySQL spatial value with an SRID other than 0 is delivered as WKB hex without its SRID, so the coordinates reach the file with no SRS and, for a geographic SRS, in the other axis order than ST_AsBinary writes, exit 0"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; delivering them as hex_wkb must refuse an SRID other than 0 by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE), because WKB holds no SRID; batch and CDC share wkb_hex_of_internal"
+    scope: source
+    switch: mysql-spatial-srid-dropped
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_spatial_value_with_an_srid_is_refused_by_code_with_its_remedies
+          - a_cdc_stream_refuses_a_spatial_value_with_an_srid_by_code_with_the_streams_remedy
+          - "lib:a_nonzero_srid_is_refused_with_its_remedy"
+          - "lib:a_spatial_cell_is_delivered_as_the_batch_hex_and_an_srid_is_refused"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: mysql-spatial-ceiling-on-hex
+    class: "the per-value ceiling is measured on the doubled hex of a MySQL spatial value, so a geometry whose bytes fit tuning.max_value_mb is refused RIVET_SOURCE_VALUE_TOO_LARGE where the same value declared binary is delivered"
+    history: "2026-11-24 - verifier finding on the MySQL spatial change: build_wkb_text skipped value_within_ceiling and the sink measured the hex at twice the bytes MySQL holds"
+    scope: source
+    switch: mysql-spatial-ceiling-on-hex
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_spatial_value_is_held_to_the_value_ceiling_on_its_bytes_like_a_binary_column
+          - "lib:a_spatial_value_over_the_ceiling_is_refused_like_binary"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: cdc-spatial-new-column-adopted
+    class: "a spatial column added to a CDC stream is adopted into the schema baseline as an upgrade-label migration, so on_schema_drift fail and warn report no drift for a new column and the baseline gains it, exit 0"
+    history: "2026-11-24 - verifier finding on the MySQL spatial change: the HexWkb arm of is_upgrade_label_migration migrated an absent column and the CDC path adopts absent columns; a pre-upgrade CDC baseline already holds the spatial column as Utf8 (measured with v0.32.2 and v0.33.0), so only a recorded unknown migrates"
+    scope: source
+    switch: cdc-spatial-new-column-adopted
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text; the MySQL spatial migration arm does not run"
+      mysql:
+        cells:
+          - a_spatial_column_added_to_a_cdc_stream_is_drift_under_fail
+          - a_spatial_column_added_to_a_cdc_stream_is_reported_and_delivered_under_warn
+          - "lib:a_hex_wkb_column_migrates_over_the_baseline_a_refused_run_recorded"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial migration arm does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial migration arm does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial migration arm does not run"
+  - name: mysql-spatial-srid-prefix-kept
+    class: "a MySQL spatial column is delivered as the hex of the server's internal bytes, the 4-byte SRID prefix included, labelled hex_wkb, so no WKB reader in the warehouse can parse it, exit 0"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the hex_wkb form is the STANDARD WKB, equal to LOWER(HEX(ST_AsBinary(col))), so the SRID prefix must be stripped in batch and CDC"
+    scope: source
+    switch: mysql-spatial-srid-prefix-kept
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_batch_parquet_export_delivers_every_spatial_type_as_the_servers_wkb_hex
+          - a_batch_csv_export_delivers_every_spatial_type_as_the_servers_wkb_hex
+          - a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_and_binlog
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:srid_zero_delivers_the_wkb_after_the_prefix"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: cdc-mysql-spatial-cell-unconverted
+    class: "a MySQL CDC stream writes a spatial column's internal bytes into the column the plan labels hex_wkb text, so the stream and the batch export of the same column disagree, or the sink stops on a type mismatch"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the CDC sink converts a spatial cell through mysql_cell_fix exactly as the batch builder does (ADR-0038 CP12)"
+    scope: source
+    switch: cdc-mysql-spatial-cell-unconverted
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_and_binlog
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_spatial_cell_is_delivered_as_the_batch_hex_and_an_srid_is_refused"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
   - name: mysql-session-off-utc-read
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
@@ -5869,7 +5966,7 @@ seeds:
           - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
           - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
       postgres:
-        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+        na: "the PostgreSQL stream text stays chrono form while batch delivers the server's text, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
       mssql:
         na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
       mongo:
@@ -6283,6 +6380,108 @@ seeds:
         na: "SQL Server has no array column type"
       mongo:
         na: "a MongoDB array is a BSON value inside the document column, never a typed array column"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-session-reads-whole-type-catalog
+    class: "the PostgreSQL CDC reader reads every array type of pg_type, built-in ones included, when a session opens, whatever the captured tables hold, so each reader session costs about 1800 more source tuples than the tables it reads need"
+    history: "found 2026-11-24 by the Nightly Gate perf probe (postgres/cdc pg_tup_returned 6905 over its 5077 baseline, first red b04f2301, since #1145); RED on main: one session open returned 3135 tuples over the 2000 ceiling"
+    scope: source
+    switch: pg-cdc-session-reads-whole-type-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog"]
+      mysql:
+        na: "the MySQL reader asks information_schema.TABLES for each configured table by name at open and holds no whole-catalog read"
+      mssql:
+        na: "the SQL Server reader joins sys.tables and sys.columns on the one capture instance it reads, never the whole catalog"
+      mongo:
+        na: "a MongoDB change stream reads no type catalog"
+      oracle:
+        na: "the Oracle reader reads all_tab_cols for the one owner and table it mines, never the whole catalog"
+
+  - name: pg-cdc-array-map-decided-at-read-time
+    class: "the PostgreSQL CDC reader decides which array types deliver as the server's text when it reads a row, not when the session opens, so a type renamed, moved to another schema or dropped between the open and the read, or a search_path with one name in two schemas, is delivered as a list where the open-time map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: after ALTER TYPE comp RENAME the stream delivered A[B((1,x))] where main delivered B({\"(1,x)\"}); same for RENAME SCHEMA, SET SCHEMA, a table row type rename and an enum and a composite of one name under a search_path"
+    scope: source
+    switch: pg-cdc-array-map-decided-at-read-time
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-builtin-name-taken-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the built-in array types unread at the session open even when a user type bears a built-in name, so a built-in array label printed schema-qualified is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 while probing #1214 after a719fc94: with search_path public, pg_catalog and a public.inet type, an inet[] column arrives as pg_catalog.inet[]"
+    scope: source
+    switch: pg-cdc-builtin-name-taken-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-built-in-schema-arrays-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the array types of a built-in schema other than pg_catalog unread at the session open, so an information_schema domain array is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head e2f742b7: with search_path public, information_schema, a cardinal_number[] column arrives as a list on the head and as text on main"
+    scope: source
+    switch: pg-cdc-built-in-schema-arrays-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-user-schema-label-asked-of-catalog
+    class: "the PostgreSQL CDC reader puts the array label of a schema other than pg_catalog to the catalog by to_regtype, which raises permission denied for a schema the CDC role cannot use, so a change of a table outside the export stops the run"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head 27141343: a REPLICATION role with no USAGE on schema secret, a secret.mood[] column changed and then a captured public table changed, stopped on permission denied for schema secret where main delivered both rows"
+    scope: source
+    switch: pg-cdc-user-schema-label-asked-of-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_role_without_usage_on_a_schema_reads_past_its_array_labels"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-unheld-array-label-asked-per-row
+    class: "the PostgreSQL CDC reader asks the catalog again for an array label it has been told the catalog does not hold, so each row carrying a renamed or dropped type costs a catalog query and its transactions"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: 20000 rows of a renamed composite array read in 18.6 s and 40025 transactions against 0.26 s and 25 on main"
+    scope: source
+    switch: pg-cdc-unheld-array-label-asked-per-row
+    engines:
+      postgres:
+        cells: ["lib:live_a_label_the_catalog_does_not_hold_is_asked_once_per_session", "lib:absorbing_an_answer_decides_every_label_asked"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
       oracle:
         na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
 
@@ -7026,8 +7225,7 @@ seeds:
       postgres:
         na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
-        cells:
-          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
+        na: "2026-11-24: the only MySQL column that reaches the unmapped refusal is a NULL literal (SELECT NULL AS g, wire type NULL), which check reads as binary and run refuses RIVET_TYPE_UNSAFE_MAPPING, so its cell is red without the seed (open_defect_a_mysql_null_literal_column_is_refused_by_check_like_the_run) and cannot grade it; closes when check reads the NULL wire type as run does"
       mssql:
         na: "2026-11-25: xml is now delivered as text and ColumnType::Null (a typeless NULL, never a table column) is the only SQL Server wire type left without an Arrow mapping, so no SQL Server column reaches the unmapped refusal or the format refusal; reopens if a SQL Server wire type loses its Arrow mapping"
       oracle:
@@ -7223,7 +7421,7 @@ seeds:
         na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
 
   - name: upgrade-baseline-not-migrated
-    class: "a drift baseline an earlier release stored for a column now delivered as server text (the native name a refused run recorded, `numeric` or `_numeric`) is read as drift on the first run after the upgrade: exit 4 under fail, a warning under the default policy, a new part every attempt"
+    class: "a drift baseline an earlier release stored for a column now delivered as text (the native name a refused run recorded: `numeric` or `_numeric`, or `unknown` for a MySQL spatial column) is read as drift on the first run after the upgrade: exit 4 under fail, a warning under the default policy, a new part every attempt"
     history: "verifier finding on #1163 head 431e0b11 2026-11-22; RED on that head by the upgrade cells below (state written by the previous release, then this release)"
     scope: source
     switch: upgrade-baseline-not-migrated
@@ -7240,7 +7438,10 @@ seeds:
           - pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_the_default_policy
           - "lib:a_baseline_a_refused_run_left_is_migrated_for_every_batch_mode_too"
       mysql:
-        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+        cells:
+          - a_spatial_column_a_previous_release_refused_is_not_drift_under_fail
+          - a_spatial_column_a_previous_release_refused_is_not_drift_under_warn
+          - "lib:a_hex_wkb_column_migrates_over_the_baseline_a_refused_run_recorded"
       mssql:
         na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
       mongo:
@@ -7329,6 +7530,36 @@ seeds:
         na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+
+  - name: secret-value-not-registered
+    class: "a credential held in a Secret is masked only where a call site remembers to register it, so a BigQuery access token (RIVET_BQ_ACCESS_TOKEN or an ADC token) a warehouse echoes in its error body reaches stderr and --summary-output verbatim"
+    history: "known_red no_secret_in_output_cloud[offline] SECRET_LEAK 2026-11-10 (the hostile replay echoes the Authorization header in a 401); Secret::new did not register, only the S3 and Azure call sites did; owner decision 2026-11-20: fix at the I1 seam (ADR-0040), register by construction"
+    scope: target
+    switch: secret-value-not-registered
+    engines:
+      bigquery:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      snowflake:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      clickhouse:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+
+  - name: registered-anchor-masked
+    class: "a registered credential equal to a scanner anchor (a URL scheme such as `postgres`, a key such as `signature` or `db.password`) is masked before the URL, keyword and query scanners run, so the anchor becomes `***` (or, for a percent-encoded key or a value straddling the anchor, is cut) and the scanner leaves ANOTHER credential after it in clear"
+    history: "independent verifier on PR 1146 head cd495ddb, 2026-11-21: registered `postgres` printed `***://rivet:StatePw1146x@db...` where main printed `postgres://REDACTED@...`; same for `signature` and `db.password`"
+    scope: source
+    switch: registered-anchor-masked
+    engines:
+      postgres:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mysql:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mssql:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mongo:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      oracle:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
 
   - name: cdc-override-value-refusal-wire-coded
     class: "a value a `columns:` override cannot hold is refused on the change stream with the wire-mismatch code (exit 1) while the batch converter and the snapshot leg of the same engine refuse it with the value code (exit 5), so one condition has two exits and `rivet check` names the other"
@@ -7527,3 +7758,60 @@ seeds:
           - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
           - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
           - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+
+  - name: value-refusal-text-remedy
+    class: "a value refusal prescribes a `columns:` text declaration that the override table then refuses, so the remedy it names cannot be followed"
+    history: "2026-11-25 - owner decision on refusal-gap group C: a PostgreSQL date, time, timestamp or array column declared text was refused as an unread pair, so the infinity, 24:00:00 and multi-dimensional-array refusals had no working remedy"
+    scope: source
+    switch: value-refusal-text-remedy
+    engines:
+      postgres:
+        cells:
+          - the_remedy_of_a_value_refusal_delivers_the_server_text_postgres
+          - "lib:a_temporal_or_array_declared_text_is_projected_and_nothing_else_is"
+          - a_text_declared_column_loads_into_clickhouse_as_the_server_text
+          - a_text_declared_column_loads_into_bigquery_as_the_server_text
+      mysql:
+        na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
+      mssql:
+        na: "the patched PostgreSQL text projection does not run on SQL Server, whose XML refusal is an unmapped type, not a value refusal (open defect, 2026-11-25: `columns: text` over XML is refused as an override mismatch)"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
+      oracle:
+        na: "the patched PostgreSQL text projection does not run on Oracle; a NUMBER of 1E125 is refused by number_text and a text declaration does not recover it (open question)"
+
+  - name: cdc-leg-text-declaration
+    class: "a CDC baseline leg that declares text over a PostgreSQL date, time, timestamp or array column delivers the server text while the change stream renders the same cell in its own form, so one `__changes` log holds two spellings"
+    history: "2026-11-25 - verifier on the group C text remedy: broadening the override table made the baseline leg accept a text declaration the stream renders differently; main refused it before any write"
+    scope: source
+    switch: cdc-leg-text-declaration
+    engines:
+      postgres:
+        cells:
+          - a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres
+      mysql:
+        na: "a MySQL baseline leg reads date and time as text already; the PostgreSQL text projection the guard names does not run"
+      mssql:
+        na: "the guard is PostgreSQL only; a SQL Server CDC baseline leg has no server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "the guard is PostgreSQL only; an Oracle CDC baseline leg has no server text projection"
+
+  - name: text-declared-temporal-cursor
+    class: "an incremental cursor_column declared text over a date or timestamp lands as text, whose order is not its order in time, and the cursor admission lets it through"
+    history: "2026-11-25 - verifier on the group C text remedy: the override table now reads a temporal column as text, so cursor_renders admitted a Utf8 cursor over it"
+    scope: source
+    switch: text-declared-temporal-cursor
+    engines:
+      postgres:
+        cells:
+          - a_temporal_cursor_declared_text_is_refused_on_every_command_postgres
+      mysql:
+        na: "a MySQL temporal column is not read through a server text projection; its text declaration is refused as an override mismatch"
+      mssql:
+        na: "a SQL Server temporal column is not read through a server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "an Oracle temporal column is not read through a server text projection"
