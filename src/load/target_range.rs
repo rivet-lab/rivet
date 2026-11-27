@@ -79,24 +79,59 @@ pub(crate) fn map_footers<T: Send>(
     Ok(out)
 }
 
-/// Refuse a load whose plan holds a date or timestamp column when a part of `uris` holds a value the warehouse cannot.
-pub(crate) fn refuse_parts_outside_ranges(
+/// Refuse a load when a part of `uris` holds a date or timestamp outside the warehouse's range, or a NULL list a BigQuery REPEATED field cannot hold.
+pub(crate) fn refuse_unholdable_parts(
     store: &GcsStore,
     plan: &super::plan::LoadPlan,
     uris: &[String],
 ) -> Result<()> {
-    let ranges = orchestrated_ranges(&plan.load.target);
-    if ranges.is_empty()
-        || !plan.specs.iter().any(holds_temporal)
-        || seeded!("bq-load-skips-range-guard", true, false)
+    let ranges = match plan.specs.iter().any(holds_temporal)
+        && !seeded!("bq-load-skips-range-guard", true, false)
     {
+        true => orchestrated_ranges(&plan.load.target),
+        false => &[],
+    };
+    let lists = matches!(plan.load.target, LoadTarget::Bigquery { .. })
+        && plan.specs.iter().any(holds_list)
+        && !seeded!("bigquery-null-array-loads-as-empty", true, false);
+    if ranges.is_empty() && !lists {
         return Ok(());
     }
-    map_footers(store, uris, |_, uri, meta| {
-        refuse_outside_ranges(meta, uri, ranges)
+    let cdc = plan.mode == super::plan::LoadMode::Cdc;
+    map_footers(store, uris, |key, uri, meta| {
+        refuse_outside_ranges(meta, uri, ranges)?;
+        match lists {
+            true => refuse_null_lists(store, key, uri, meta, cdc),
+            false => Ok(()),
+        }
     })
     .map(|_| ())
     .with_context(|| format!("export `{}`", plan.export_name))
+}
+
+/// Refuse a part holding a NULL list, which a BigQuery REPEATED field cannot keep and would load as `[]`, before any write.
+fn refuse_null_lists(
+    store: &GcsStore,
+    key: &str,
+    uri: &str,
+    meta: &ParquetMetaData,
+    cdc: bool,
+) -> Result<()> {
+    let columns = super::part_lists::list_columns(meta);
+    match super::part_lists::first_null_list(store, key, meta, &columns, cdc)? {
+        None => Ok(()),
+        Some(column) => crate::rivet_bail!(
+            crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
+            "{uri}: column `{column}` holds a NULL list, and a BigQuery REPEATED field cannot be NULL: it would load as [], the same value as an empty list. Nothing was written. {}",
+            super::part_lists::null_list_remedy(column, cdc)
+        ),
+    }
+}
+
+/// A column the warehouse declares as a list.
+fn holds_list(spec: &crate::types::target::TargetColumnSpec) -> bool {
+    use crate::types::target::{BqType, TargetType};
+    matches!(&spec.target_type, TargetType::BigQuery(BqType::Array(_)))
 }
 
 /// A column the warehouse declares as a date or a timestamp, or a list of them.
@@ -303,5 +338,76 @@ mod tests {
         }
         assert!(!holds_temporal(&spec(ChType::Date32.into())));
         assert!(!holds_temporal(&spec(TargetType::Unmapped)));
+    }
+
+    fn list_part_refusal(
+        tags: &[Option<Vec<Option<i32>>>],
+        ops: Option<&[&str]>,
+        cdc: bool,
+    ) -> Option<String> {
+        use arrow::array::{Int32Builder, ListBuilder, StringArray};
+        let mut b = ListBuilder::new(Int32Builder::new());
+        for t in tags {
+            match t {
+                Some(items) => {
+                    items.iter().for_each(|i| b.values().append_option(*i));
+                    b.append(true);
+                }
+                None => b.append(false),
+            }
+        }
+        let mut cols = vec![("tags", Arc::new(b.finish()) as ArrayRef)];
+        if let Some(ops) = ops {
+            cols.push(("__op", Arc::new(StringArray::from(ops.to_vec()))));
+        }
+        let batch = RecordBatch::try_from_iter(cols).unwrap();
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.parquet"), buf).unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let meta = super::super::partition_budget::read_footer(&store, "p.parquet").unwrap();
+        let err = refuse_null_lists(&store, "p.parquet", "gs://b/p.parquet", &meta, cdc).err()?;
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE")
+        );
+        Some(format!("{err:#}"))
+    }
+
+    /// A NULL list is refused by code with the batch remedy, or the CDC remedy for a change log; the message is pinned word for word.
+    #[test]
+    fn a_null_list_is_refused_with_the_remedy_its_load_mode_can_apply() {
+        let tags = [Some(vec![Some(1)]), None];
+        assert_eq!(
+            list_part_refusal(&tags, None, false).as_deref(),
+            Some(
+                "gs://b/p.parquet: column `tags` holds a NULL list, and a BigQuery REPEATED field cannot be NULL: it would load as [], the same value as an empty list. \
+                 Nothing was written. In the export's `query:` read it as COALESCE(tags, '{}') AS tags to load [] on purpose, \
+                 or as tags::text AS tags to keep the NULL, or correct the source value."
+            )
+        );
+        let said = list_part_refusal(&tags, None, true).expect("a change log refuses a NULL list");
+        assert!(
+            said.contains("A CDC export cannot reshape `tags` in its config")
+                && said.contains(crate::source::cdc::checkpoint_identity::RECOVER)
+                && !said.contains("COALESCE"),
+            "{said}"
+        );
+    }
+
+    /// An empty list and a list holding a NULL element are let through; a change log's delete row is exempt, a load that is not a change log has none.
+    #[test]
+    fn an_empty_list_a_null_element_and_a_cdc_delete_row_are_not_refused() {
+        let kept = [Some(vec![]), Some(vec![None]), Some(vec![Some(1), None])];
+        assert_eq!(list_part_refusal(&kept, None, false), None);
+        let tags = [Some(vec![Some(1)]), None, None];
+        let ops = ["insert", "delete", "delete"];
+        assert_eq!(list_part_refusal(&tags, Some(&ops), true), None);
+        assert!(list_part_refusal(&tags, Some(&ops), false).is_some());
+        let ops = ["insert", "delete", "update"];
+        assert!(list_part_refusal(&tags, Some(&ops), true).is_some());
     }
 }
