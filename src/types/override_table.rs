@@ -274,6 +274,11 @@ pub(crate) fn is_server_text_projection(engine: Engine, src: &RivetType, tgt: &R
         && kind_of(tgt) == Text
 }
 
+/// Whether `overrides` declares any column text, the only declaration a server-rendered column can conflict with.
+pub(crate) fn declares_text(overrides: &ColumnOverrides) -> bool {
+    overrides.values().any(|target| kind_of(target) == Text)
+}
+
 /// The first of `detected` that `overrides` declares text and the batch reader delivers as the server's own text.
 pub(crate) fn server_text_declared<'a>(
     engine: Engine,
@@ -335,6 +340,19 @@ pub fn refusal_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `declares_text` is true only for an override whose target is text.
+    #[test]
+    fn declares_text_is_true_only_for_a_text_target() {
+        assert!(!declares_text(&ColumnOverrides::new()));
+        assert!(!declares_text(&one("c", RivetType::Int64)));
+        assert!(declares_text(&one("c", RivetType::String)));
+        let mixed = ColumnOverrides::from([
+            ("a".to_string(), RivetType::Int64),
+            ("b".to_string(), RivetType::String),
+        ]);
+        assert!(declares_text(&mixed));
+    }
 
     const ENGINES: [Engine; 5] = [
         Engine::Postgres,

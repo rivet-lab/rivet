@@ -3876,6 +3876,7 @@ dependencies = [
 name = "rivet-cli"
 version = "0.33.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "arrow",
  "arrow-schema",

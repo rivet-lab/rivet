@@ -295,7 +295,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
             if missing:
                 out.append(Result(cell, DELIVERED, EMPTY, f"{len(missing)} of {len(exp)} change rows not delivered, e.g. {missing[:3]}"))
                 continue
-            nulled, wrong = [], []
+            nulled, wrong, wrong_lits = [], [], []
             run = leg_run(leg)
             zeros = 0
             for op, i, k in exp:
@@ -306,13 +306,14 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
                     nulled.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}")
                 elif v == WRONG:
                     wrong.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}->{seen[(op, i)].get(key)!r}")
+                    wrong_lits.append(lit(c, k))
             if zeros:
                 total = zero_nulls_by_run(engine, c, u, n, seen)[run]
                 if unwarned := nsn.zero_date_unwarned(total, nsn.warned_counts(p.out).get(key, 0)):
                     nulled.append(unwarned)
             if nulled:
                 out.append(Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fid))
-            elif wrong and fid in ("lossy", "logical_string", "unsupported"):
+            elif wrong and nsn.excused_by_fidelity(engine, wrong_lits, fid):
                 out.append(Result(cell, nsn.DECLARED, "", f"{len(wrong)} values changed under fidelity {fid}", fidelity=fid))
             elif wrong:
                 out.append(Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fid or '?'}, e.g. {wrong[:3]}", fidelity=fid))
