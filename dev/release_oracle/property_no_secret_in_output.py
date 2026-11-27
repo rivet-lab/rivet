@@ -1095,8 +1095,10 @@ def stage_drop(prefix: str) -> None:
         with urllib.request.urlopen(f"{base}?prefix={urllib.parse.quote(prefix)}", timeout=10) as r:
             names = [o["name"] for o in json.load(r).get("items", [])]
         for n in names:
-            with contextlib.suppress(OSError):
-                urllib.request.urlopen(urllib.request.Request(f"{base}/{urllib.parse.quote(n, safe='')}", method="DELETE"), timeout=10).close()
+            with contextlib.suppress(OSError), urllib.request.urlopen(
+                urllib.request.Request(f"{base}/{urllib.parse.quote(n, safe='')}", method="DELETE"), timeout=10
+            ):
+                pass
 
 
 def stage_export(binary: Path, scene: Scene) -> dict[str, bytes]:
