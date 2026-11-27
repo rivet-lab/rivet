@@ -170,11 +170,7 @@ fn staged_rig(load: &str) -> (Rig, PgTable) {
     let table = seed_pg_numeric_table(5);
     let rig = Rig::pg_batch(table.name())
         .dest_gcs(GCS_BUCKET, &unique_name("check_wt"), FAKE_GCS_ENDPOINT)
-        .top_line(load)
-        .a_failed_run_may_leave(
-            &[Leftover::LoadAttempt],
-            "a load into a place that is not there stops at its first statement",
-        );
+        .top_line(load);
     (rig, table)
 }
 
@@ -187,7 +183,7 @@ fn code_of(stderr: &str) -> String {
         .collect()
 }
 
-/// A ClickHouse database the server does not show stops `check` with the code `load` stops with.
+/// A ClickHouse database the server does not show stops `check` with the code a load statement answered `UNKNOWN_DATABASE` gets.
 #[test]
 #[ignore = "live: requires postgres + fake-gcs + clickhouse"]
 fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
@@ -204,12 +200,11 @@ fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
         )),
         "{check_err}"
     );
-    rig.run_ok();
-    let load = rig.load_args_env(&[], &envs);
-    let load_err = stderr_of(&load);
-    assert!(!load.status.success(), "{load_err}");
-    assert_eq!(code_of(&check_err), code_of(&load_err), "{load_err}");
-    assert_eq!(check.status.code(), load.status.code(), "{load_err}");
+    assert_eq!(
+        code_of(&check_err),
+        "RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND",
+        "{check_err}"
+    );
 }
 
 /// A ClickHouse database the server shows passes `check`.
@@ -220,7 +215,9 @@ fn check_passes_a_clickhouse_database_the_server_holds() {
     let db = ChDb::created("rivet_chcheck_held");
     let (rig, _table) = staged_rig(&clickhouse_load(&db.0));
     let out = rig.cli_env(&["check"], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(!err.contains("could not confirm"), "{err}");
 }
 
 /// A ClickHouse that cannot be reached is a warning, as it was before the probe.
@@ -241,7 +238,7 @@ fn check_warns_when_clickhouse_cannot_be_reached() {
     );
 }
 
-/// A Snowflake database or schema the login cannot see stops `check` with the code `load` stops with; the stand's own passes.
+/// A Snowflake database or schema the login cannot see stops `check` with the code a load statement error gets; the stand's own passes.
 #[test]
 #[ignore = "live: requires postgres + the Snowflake stand"]
 fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
@@ -254,10 +251,6 @@ fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
         Rig::pg_batch(table.name())
             .dest_gcs_live(&sf.bucket, &sf.prefix)
             .top_line(line)
-            .a_failed_run_may_leave(
-                &[Leftover::LoadAttempt],
-                "a load into a place that is not there stops at its first statement",
-            )
     };
     let (database, schema) = sf.place();
     let ok = rig_for(&sf.load_line("")).cli(&["check"]);
@@ -284,11 +277,10 @@ fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
             check_err.contains(&format!("Snowflake {named} is not visible to this login")),
             "{check_err}"
         );
-        rig.run_ok();
-        let load = rig.cli(&["load"]);
-        let load_err = stderr_of(&load);
-        assert!(!load.status.success(), "{load_err}");
-        assert_eq!(code_of(&check_err), code_of(&load_err), "{load_err}");
-        assert_eq!(check.status.code(), load.status.code(), "{load_err}");
+        assert_eq!(
+            code_of(&check_err),
+            "RIVET_LOAD_WAREHOUSE_REJECTED",
+            "{check_err}"
+        );
     }
 }

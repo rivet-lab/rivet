@@ -538,8 +538,27 @@ fn ask_within(
     std::thread::spawn(move || {
         let _ = tx.send(ask(&target, &credential));
     });
-    rx.recv_timeout(budget)
-        .map_err(|_| anyhow::anyhow!("no answer within {} s", budget.as_secs()))?
+    rx.recv_timeout(budget).map_err(|_| {
+        crate::error::coded(
+            crate::error::codes::LOAD_WAREHOUSE_UNAVAILABLE,
+            format!("no answer within {} s", budget.as_secs()),
+        )
+    })?
+}
+
+/// The ClickHouse loader the load and the check both build from a `load:` block.
+fn clickhouse_loader(
+    url: &crate::secret::Secret,
+    database: &str,
+    user: &str,
+    password_env: &str,
+    ca_file: &Option<String>,
+    allow_plaintext: bool,
+    destination: crate::config::DestinationConfig,
+) -> clickhouse::ClickhouseLoader {
+    clickhouse::ClickhouseLoader::new(url.expose(), database, user, password_env, destination)
+        .ca_file(ca_file.clone())
+        .allow_plaintext(allow_plaintext)
 }
 
 /// The question `rivet check` puts to the warehouse `target` names, with the login the load uses.
@@ -565,15 +584,15 @@ fn ask_warehouse(
             ca_file,
             allow_plaintext,
         } => {
-            let loader = clickhouse::ClickhouseLoader::new(
-                url.expose(),
+            let loader = clickhouse_loader(
+                url,
                 database,
                 user,
                 password_env,
+                ca_file,
+                *allow_plaintext,
                 Default::default(),
-            )
-            .ca_file(ca_file.clone())
-            .allow_plaintext(*allow_plaintext);
+            );
             Ok(missing_clickhouse_database(
                 loader.database_held()?,
                 database,
@@ -1330,16 +1349,16 @@ pub fn build_loader(
             ca_file,
             allow_plaintext,
         } => Box::new(
-            clickhouse::ClickhouseLoader::new(
-                url.expose(),
+            clickhouse_loader(
+                url,
                 database,
                 user,
                 password_env,
+                ca_file,
+                *allow_plaintext,
                 plan.destination.clone(),
             )
             .named_collection(named_collection.clone())
-            .ca_file(ca_file.clone())
-            .allow_plaintext(*allow_plaintext)
             .cluster_by(plan.clustering.columns().to_vec())
             .partition_by(plan.partition.as_ref().map(|p| p.expr.clone()))
             .cdc(plan.mode == plan::LoadMode::Cdc)
