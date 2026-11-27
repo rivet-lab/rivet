@@ -608,13 +608,7 @@ fn ask_warehouse(
             schema,
             ..
         } => {
-            let login = snowflake_login(
-                &|var| std::env::var(var).ok(),
-                account,
-                user,
-                private_key_path,
-                role.as_deref(),
-            );
+            let login = snowflake_login_from_env(account, user, private_key_path, role.as_deref());
             Ok(missing_snowflake_place(
                 login.place(database, schema)?,
                 database,
@@ -1322,13 +1316,7 @@ pub fn build_loader(
             schema,
             storage_integration,
         } => {
-            let mut l = snowflake_login(
-                &|var| std::env::var(var).ok(),
-                account,
-                user,
-                private_key_path,
-                role.as_deref(),
-            );
+            let mut l = snowflake_login_from_env(account, user, private_key_path, role.as_deref());
             l.warehouse = warehouse.clone();
             l.database = database.clone();
             l.schema = schema.clone();
@@ -1365,6 +1353,22 @@ pub fn build_loader(
             .journaled(journal.clone()),
         ),
     }
+}
+
+/// The Snowflake loader the load and the check both sign in with, reading the override variables from the process environment.
+fn snowflake_login_from_env(
+    account: &str,
+    user: &str,
+    private_key_path: &str,
+    role: Option<&str>,
+) -> SnowflakeLoader {
+    snowflake_login(
+        &|var| std::env::var(var).ok(),
+        account,
+        user,
+        private_key_path,
+        role,
+    )
 }
 
 /// A Snowflake loader signed in with the configured login, each of which RIVET_SNOWFLAKE_ACCOUNT, _USER, _KEY and _ROLE overrides when set and not blank.
