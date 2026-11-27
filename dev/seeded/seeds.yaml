@@ -7816,7 +7816,6 @@ seeds:
         na: "a MongoDB export has no PostgreSQL text projection"
       oracle:
         na: "an Oracle temporal column is not read through a server text projection"
-<<<<<<< HEAD
 
   - name: json-override-unvalidated
     class: "a `columns: {c: json}` override over a text, blob or geometry value that is valid UTF-8 but not JSON is delivered unvalidated with exit 0 into an `arrow.json` column no JSON reader opens, and `validate --depth full` passes it"
@@ -7834,7 +7833,6 @@ seeds:
         na: "a MongoDB export holds no text column a json declaration could retype: the override table reads only json to text, so a text to json declaration is refused as RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (a_json_override_on_a_mongo_export_refuses_a_pair_it_does_not_read_and_delivers_json_mongo)"
       oracle:
         cells: [a_json_override_delivers_json_text_or_refuses_by_code_oracle]
-=======
   - name: clickhouse-uuid-lands-as-bytes
     class: "a ClickHouse load lands a uuid column as `FixedString(16)` raw bytes where ClickHouse has a native `UUID`"
     history: "owner decision 2026-11-22 (types topic): the ledger carried clickhouse defect rows for PG UUID, PG UUID[] and MSSQL UNIQUEIDENTIFIER (ADR-0038 CP1); RED on main 2026-11-22 (the cells below)"
@@ -7857,4 +7855,3 @@ seeds:
         na: "Oracle has no uuid column type and the type ledger holds no uuid row for it; the shared column_type is graded by the postgres and mssql cells"
       mongo:
         na: "a MongoDB field is read into its one `document` column; no uuid column reaches the ClickHouse typed loader"
->>>>>>> origin/main
