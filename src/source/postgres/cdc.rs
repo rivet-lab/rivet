@@ -4142,7 +4142,7 @@ mod tests {
         assert_eq!(slot_plugin_on(&mut c, &slot).unwrap(), None);
     }
 
-    /// Live: a session whose captured table holds no array reads no array catalog; the tuples one open returns stay under the cost of the array scan alone.
+    /// Live: a session whose captured table holds no array reads no array catalog; the pg_type tuples one open reads stay under the cost of the array scan alone, counted once every other backend of the database has exited and flushed its statistics.
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog() {
@@ -4161,16 +4161,30 @@ mod tests {
             .batch_execute("CREATE TABLE public.t (id INT PRIMARY KEY, v TEXT)")
             .unwrap();
         drop(setup);
-        let returned = |admin: &mut Client| -> i64 {
+        let mut monitor = Client::connect(&conn, NoTls).unwrap();
+        let type_catalog_tuples = |monitor: &mut Client| -> i64 {
+            for _ in 0..100 {
+                let backends: i64 = monitor
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()",
+                        &[],
+                    )
+                    .unwrap()
+                    .get(0);
+                if backends == 1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let mut last = -1;
             for _ in 0..40 {
-                admin
+                monitor
                     .batch_execute("SELECT pg_stat_clear_snapshot()")
                     .unwrap();
-                let now: i64 = admin
+                let now: i64 = monitor
                     .query_one(
-                        "SELECT tup_returned FROM pg_stat_database WHERE datname = $1",
-                        &[&db],
+                        "SELECT (seq_tup_read + idx_tup_fetch)::bigint FROM pg_stat_sys_tables WHERE relname = 'pg_type'",
+                        &[],
                     )
                     .unwrap()
                     .get(0);
@@ -4182,7 +4196,7 @@ mod tests {
             }
             last
         };
-        let before = returned(&mut admin);
+        let before = type_catalog_tuples(&mut monitor);
         let open = PgChangeStream::open(
             &conn,
             &slot,
@@ -4196,7 +4210,8 @@ mod tests {
             None,
         );
         drop(open.unwrap());
-        let after = returned(&mut admin);
+        let after = type_catalog_tuples(&mut monitor);
+        drop(monitor);
         admin
             .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
             .ok();
@@ -4204,10 +4219,10 @@ mod tests {
             .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
             .unwrap();
         let delta = after - before;
-        eprintln!("session open returned {delta} tuples");
+        eprintln!("session open read {delta} pg_type tuples");
         assert!(
             delta < SESSION_OPEN_TUPLE_CEILING,
-            "one session open returned {delta} tuples, over {SESSION_OPEN_TUPLE_CEILING}: it read the type catalog wholesale"
+            "one session open read {delta} pg_type tuples, over {SESSION_OPEN_TUPLE_CEILING}: it read the type catalog wholesale"
         );
     }
 
