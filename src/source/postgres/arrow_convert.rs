@@ -1579,6 +1579,23 @@ mod server_text_projection_tests {
         }
     }
 
+    /// An extension type with no rivet mapping (PostGIS `geometry`, `geography`) is server text, read as `::text` (EWKB hex), never refused.
+    #[test]
+    fn a_postgis_extension_type_is_server_text_not_a_refusal() {
+        use postgres::types::Kind;
+        for name in ["geometry", "geography"] {
+            let t = Type::new(name.into(), 90_100, Kind::Simple, "public".into());
+            assert!(pg_server_text(&t), "{name} is server text");
+            assert_eq!(
+                pg_server_text_query("SELECT 1", &[("g", &t, true)]).as_deref(),
+                Some(
+                    "SELECT _rivet_text._c0::text AS \"g\" FROM (SELECT 1\n) AS _rivet_text (_c0)"
+                ),
+                "{name}"
+            );
+        }
+    }
+
     /// A `numeric` the catalog or a `columns:` override types keeps its wire read; one nothing types, and a numeric array, is read as text.
     #[test]
     fn a_numeric_is_read_as_text_only_where_nothing_types_it() {

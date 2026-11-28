@@ -1752,6 +1752,89 @@ fn a_collection_column_is_refused_by_name_and_fails_strict_check() {
     );
 }
 
+/// An object or collection column is refused by code, and each remedy the text names delivers the source.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_object_or_collection_column_refusal_names_remedies_that_deliver() {
+    require_alive(LiveService::Oracle);
+    let base = crate::common::unique_name("ora_obj").to_uppercase();
+    let (obj, arr) = (format!("{base}_O"), format!("{base}_V"));
+    ora_exec(&format!(
+        "CREATE TYPE {obj} AS OBJECT (a NUMBER, b VARCHAR2(10))"
+    ));
+    ora_exec(&format!("CREATE TYPE {arr} AS VARRAY(5) OF NUMBER"));
+    let t = OracleTable::create(
+        "ora_obj",
+        &format!("id NUMBER(10) PRIMARY KEY, o {obj}, v {arr}"),
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES (1, {obj}(7, 'x'), {arr}(1, 2))",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES (2, {obj}(8, 'y'), {arr}(3))",
+        t.name()
+    ));
+    let table = t.name().to_string();
+    let mut rig = Rig::oracle_batch(&table);
+    rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1),
+        vec![
+            Remedy::wrong(
+                "declares the object column text under `columns:`",
+                Then::Refuses(Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1)),
+                |r| r.rebuilt(|rig| rig.restage("full", &["columns: {O: text}"])),
+            ),
+            Remedy::new(
+                "select an object type's scalar attributes (`t.col.attr`)",
+                Then::DeliversTheSource,
+                {
+                    let table = table.clone();
+                    move |r| {
+                        r.rebuilt(|rig| {
+                            rig.restage("full", &[]).query(&format!(
+                                "SELECT t.id, t.o.a AS oa, t.o.b AS ob FROM {table} t"
+                            ))
+                        })
+                    }
+                },
+            ),
+            Remedy::new(
+                "select a collection's elements through `TABLE(t.col)`",
+                Then::DeliversTheSource,
+                {
+                    let table = table.clone();
+                    move |r| {
+                        r.rebuilt(|rig| {
+                            rig.restage("full", &[]).query(&format!(
+                                "SELECT t.id, e.COLUMN_VALUE AS element FROM {table} t, TABLE(t.v) e"
+                            ))
+                        })
+                    }
+                },
+            ),
+            Remedy::new(
+                "or leave the column out",
+                Then::DeliversTheSource,
+                {
+                    let table = table.clone();
+                    move |r| {
+                        r.rebuilt(|rig| {
+                            rig.restage("full", &[])
+                                .query(&format!("SELECT id FROM {table}"))
+                        })
+                    }
+                },
+            ),
+        ],
+    );
+    drop(t);
+    ora_exec(&format!("DROP TYPE {obj}"));
+    ora_exec(&format!("DROP TYPE {arr}"));
+}
+
 /// An INVISIBLE key column is named as such, not blamed on case.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

@@ -93,6 +93,7 @@ pub const NANOSECOND_RANGE: &str = "1677-09-21..2262-04-11";
 #[derive(Clone, Copy, Debug)]
 pub enum NanosSource {
     Mssql,
+    MssqlOffset,
     Oracle,
 }
 
@@ -100,7 +101,7 @@ impl NanosSource {
     /// The engine name the refusal starts with.
     fn name(self) -> &'static str {
         match self {
-            Self::Mssql => "mssql",
+            Self::Mssql | Self::MssqlOffset => "mssql",
             Self::Oracle => "oracle",
         }
     }
@@ -112,6 +113,11 @@ impl NanosSource {
                 " `text` is for a batch export and a stream-only CDC export (SQL Server refuses it \
                  on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` \
                  or `timestamp_tz`."
+            }
+            Self::MssqlOffset => {
+                " `text` is for a batch export only: a CDC baseline refuses it, and a stream-only \
+                 CDC export delivers a datetimeoffset as UTC text without its offset; a `mode: cdc` \
+                 export declares `timestamp_tz`."
             }
             Self::Oracle => "",
         }
@@ -362,6 +368,25 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "mssql: column `event_ts` holds 2300-01-01 00:00:00, outside the nanosecond timestamp range (1677-09-21..2262-04-11) its nanosecond type (a sub-microsecond column, or a `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would lose the value. Declare `event_ts: text` under `columns:` and rivet delivers the server's own text for every row. Declare the column `timestamp` (microseconds, full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`. `text` is for a batch export and a stream-only CDC export (SQL Server refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` or `timestamp_tz`."
+        );
+    }
+
+    /// A `datetimeoffset` refusal advises `text` for a batch export only and `timestamp_tz` for a CDC export; its head is the SQL Server one.
+    #[test]
+    fn the_datetimeoffset_nanosecond_refusal_does_not_advise_text_for_a_stream_only_export() {
+        let when = at(2300, 1, 1, 0, 0, 0, 0);
+        let plain = timestamp_nanos_or_refuse(when, NanosSource::Mssql, "event_ts").unwrap_err();
+        let offset =
+            timestamp_nanos_or_refuse(when, NanosSource::MssqlOffset, "event_ts").unwrap_err();
+        crate::error::assert_coded(&offset, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        let (plain, offset) = (format!("{plain:#}"), format!("{offset:#}"));
+        let head = |t: &str| t[..t.find(" `text` is for a batch").unwrap()].to_string();
+        assert_eq!(head(&plain), head(&offset));
+        assert!(
+            offset.ends_with(
+                " `text` is for a batch export only: a CDC baseline refuses it, and a stream-only CDC export delivers a datetimeoffset as UTC text without its offset; a `mode: cdc` export declares `timestamp_tz`."
+            ),
+            "{offset}"
         );
     }
 

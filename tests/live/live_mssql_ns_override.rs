@@ -122,6 +122,58 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
     }
 }
 
+/// A `datetimeoffset` past the nanosecond range is refused without advising `text` for a stream-only CDC export, and the batch remedies the text names deliver.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetimeoffset_past_the_nanosecond_range_is_not_advised_text_for_a_stream_only_export() {
+    require_alive(LiveService::Mssql);
+    let (table, _guard) = table_of(
+        "DATETIMEOFFSET(7)",
+        &[
+            "'2024-02-29 12:34:56.1234560 +02:00'",
+            "'2300-01-01 00:00:00.0000000 +02:00'",
+        ],
+    );
+    let mut rig = Rig::mssql_batch(&table);
+    let table_q = table.clone();
+    let said = rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+        vec![
+            Remedy::wrong(
+                "empties the destination and runs again",
+                Then::Refuses(Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5)),
+                |r| {
+                    for f in std::fs::read_dir(r.out_dir()).expect("the destination").flatten() {
+                        let _ = std::fs::remove_file(f.path());
+                    }
+                },
+            ),
+            Remedy::new(
+                "`text` is for a batch export only",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|rig| rig.restage("full", &["columns: {v: text}"])),
+            ),
+            Remedy::new("Declare the column `timestamp`", Then::DeliversTheSource, |r| {
+                r.rebuilt(|rig| rig.restage("full", &["columns: {v: timestamp_tz}"]))
+            }),
+            Remedy::new("CAST it in the export's `query:`", Then::DeliversTheSource, move |r| {
+                r.rebuilt(|rig| {
+                    rig.restage("full", &[]).query(&format!(
+                        "SELECT id, CAST(v AS DATETIMEOFFSET(6)) AS v FROM dbo.{table_q} ORDER BY id"
+                    ))
+                })
+            }),
+        ],
+    );
+    assert!(
+        said.contains("a CDC baseline refuses it, and a stream-only CDC export delivers a datetimeoffset as UTC text without its offset; a `mode: cdc` export declares `timestamp_tz`.")
+            && !said.contains("batch export and a stream-only CDC export"),
+        "{said}"
+    );
+}
+
 /// A table of in-range values and a NULL delivers every value at its 100 ns tick and the NULL as NULL.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
