@@ -475,16 +475,17 @@ fn first_timestamp_scale(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
-/// The nanosecond refusal wording of the cell: a `datetimeoffset` loses its offset on a CDC stream, any other date-time does not.
-fn nanos_source(row: &Row, idx: usize) -> NanosSource {
-    match cell(row, idx) {
+/// The cell's nanoseconds, or the refusal worded for its type: a `datetimeoffset` loses its offset on a CDC stream, any other date-time does not.
+fn cell_nanos_or_refuse(row: &Row, idx: usize, dt: NaiveDateTime, column: &str) -> Result<i64> {
+    let source = match cell(row, idx) {
         Some(ColumnData::DateTimeOffset(_)) => seeded!(
             "mssql-offset-nanos-refusal-advises-text",
             NanosSource::Mssql,
             NanosSource::MssqlOffset
         ),
         _ => NanosSource::Mssql,
-    }
+    };
+    timestamp_nanos_or_refuse(dt, source, column)
 }
 
 /// The UTC instant of a `datetime2` / `datetimeoffset` cell, or a coded mismatch when the cell is neither.
@@ -824,11 +825,7 @@ fn build_array(
                     Some(dt) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
-                        Some(timestamp_nanos_or_refuse(
-                            dt,
-                            nanos_source(row, idx),
-                            column
-                        )?)
+                        Some(cell_nanos_or_refuse(row, idx, dt, column)?)
                     ) {
                         Some(ns) => b.append_value(ns),
                         None => b.append_null(),
