@@ -215,7 +215,7 @@ fn table() -> Vec<Case> {
         case(
             "udt",
             of(ColumnType::Udt, None),
-            "string | Utf8 | native | exact | reads string,json,uuid",
+            "string | Utf8 | text:hex_bytes | logical_string | reads string,json,uuid",
         ),
         case(
             "xml",

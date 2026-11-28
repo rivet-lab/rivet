@@ -22,7 +22,7 @@ const ROWS: &[&str] = &[
     "(4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
 ];
 
-type Grid = Vec<Vec<Option<String>>>;
+pub(crate) type Grid = Vec<Vec<Option<String>>>;
 
 fn declared() -> String {
     let cols: Vec<String> = COLUMNS.iter().map(|(c, _)| format!("{c}: text")).collect();
@@ -76,7 +76,7 @@ fn server_rows(table: &str) -> Grid {
         .collect()
 }
 
-fn json_text(v: &serde_json::Value) -> Option<String> {
+pub(crate) fn json_text(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
@@ -91,7 +91,7 @@ fn check(receiver: &str, got: Grid, want: Grid) {
     );
 }
 
-fn clickhouse_rows_json(sql: &str) -> Grid {
+pub(crate) fn clickhouse_rows_json(sql: &str) -> Grid {
     let body = {
         let resp = reqwest::blocking::Client::new()
             .post(CLICKHOUSE_HTTP_URL)
@@ -113,10 +113,10 @@ fn clickhouse_rows_json(sql: &str) -> Grid {
         .collect()
 }
 
-struct ChDb(String);
+pub(crate) struct ChDb(pub(crate) String);
 
 impl ChDb {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let name = unique_name("vrl_chdb");
         let resp = reqwest::blocking::Client::new()
             .post(CLICKHOUSE_HTTP_URL)

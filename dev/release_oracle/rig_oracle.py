@@ -695,7 +695,7 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 "SELECT COLUMN_NAME, UPPER(DATA_TYPE) + CASE WHEN DATA_TYPE IN ('decimal', 'numeric') THEN "
                 "'(' + CAST(NUMERIC_PRECISION AS varchar) + ',' + CAST(NUMERIC_SCALE AS varchar) + ')' "
                 "WHEN DATA_TYPE IN ('datetime2', 'datetimeoffset') THEN '(' + CAST(DATETIME_PRECISION AS varchar) + ')' "
-                "WHEN CHARACTER_MAXIMUM_LENGTH > 0 THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
+                "WHEN CHARACTER_MAXIMUM_LENGTH > 0 AND DATA_TYPE <> 'hierarchyid' THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
                 "ELSE '' END FROM INFORMATION_SCHEMA.COLUMNS "
                 f"WHERE TABLE_SCHEMA = {_lit(sch)} AND TABLE_NAME = {_lit(leaf)}"
             ) + ")"
