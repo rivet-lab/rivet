@@ -913,6 +913,9 @@ impl BatchSink for ExportSink {
 
         self.check_value_ceiling(dest_batch)?;
         crate::source::refuse_decimal_overflow(dest_batch)?;
+        crate::source::refuse_non_json(dest_batch, |c| {
+            self.override_columns.iter().any(|o| o == c)
+        })?;
 
         if let Some(limit) = self.max_batch_memory_bytes
             && crate::tuning::SourceTuning::batch_memory_bytes(dest_batch) > limit

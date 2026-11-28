@@ -1,6 +1,7 @@
 pub(crate) mod batch_controller;
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
+pub(crate) mod json_text;
 pub(crate) mod keyset_key;
 pub mod mongo;
 pub mod mssql;
@@ -728,6 +729,36 @@ pub(crate) fn refuse_decimal_overflow(batch: &RecordBatch) -> Result<()> {
     Ok(())
 }
 
+/// Refuses a batch whose `columns:`-declared `json` column holds text that is not JSON, naming the column and the text remedy.
+pub(crate) fn refuse_non_json(batch: &RecordBatch, declared: impl Fn(&str) -> bool) -> Result<()> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType;
+    if !seeded!("json-override-unvalidated", false, true) {
+        return Ok(());
+    }
+    let schema = batch.schema();
+    for (field, col) in schema.fields().iter().zip(batch.columns()) {
+        if field.extension_type_name() != Some("arrow.json") || !declared(field.name()) {
+            continue;
+        }
+        let texts: Box<dyn Iterator<Item = Option<&str>>> = match field.data_type() {
+            DataType::Utf8 => Box::new(col.as_string::<i32>().iter()),
+            DataType::LargeUtf8 => Box::new(col.as_string::<i64>().iter()),
+            _ => continue,
+        };
+        if texts.flatten().any(|t| !json_text::is_json_text(t)) {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                "column `{}` is declared `json` but holds a value that is not JSON — rivet refuses \
+                 rather than writing a column no JSON reader can open. {}",
+                field.name(),
+                crate::types::text_remedy(field.name())
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The keyset keys among a table's single-column unique-index columns, given as (column, is the primary key).
 pub(crate) fn keyset_keys_primary_first(columns: &[(String, bool)]) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
@@ -1359,5 +1390,91 @@ mod grants_boundary_tests {
             "{mongo}\n{mysql}"
         );
         assert!(!mysql.is_empty() && mongo != mysql && !mongo.contains("xyzzy"));
+    }
+}
+
+#[cfg(test)]
+mod json_declared_tests {
+    use super::refuse_non_json;
+    use arrow::array::{ArrayRef, LargeStringArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use arrow_schema::extension::Json;
+    use std::sync::Arc;
+
+    fn batch(json: bool, ty: DataType, values: &[Option<&str>]) -> RecordBatch {
+        let mut field = Field::new("v", ty.clone(), true);
+        if json {
+            field = field.with_extension_type(Json::default());
+        }
+        let col: ArrayRef = match ty {
+            DataType::LargeUtf8 => Arc::new(LargeStringArray::from(values.to_vec())),
+            _ => Arc::new(StringArray::from(values.to_vec())),
+        };
+        RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![col]).unwrap()
+    }
+
+    fn run(b: &RecordBatch, declared: &[&str]) -> crate::error::Result<()> {
+        refuse_non_json(b, |c| declared.contains(&c))
+    }
+
+    #[test]
+    fn a_declared_json_column_holding_text_that_is_not_json_is_refused_by_code() {
+        for bad in [
+            "abc",
+            "",
+            " ",
+            "{'a':1}",
+            r#"{"a":1}x"#,
+            "[1,",
+            "\u{1}\u{2}",
+            "NaN",
+            "0102",
+        ] {
+            for ty in [DataType::Utf8, DataType::LargeUtf8] {
+                let err = run(&batch(true, ty, &[Some("1"), Some(bad)]), &["v"]).unwrap_err();
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+                let said = format!("{err:#}");
+                for want in [
+                    "column `v` is declared `json` but holds a value that is not JSON",
+                    "Declare `v: text` under `columns:`",
+                ] {
+                    assert!(said.contains(want), "{bad:?}: {said}");
+                }
+                assert!(
+                    !said.contains(bad) || bad.len() < 2,
+                    "the refusal never prints the value"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn json_text_of_every_kind_and_null_pass() {
+        let ok = [
+            Some("{}"),
+            Some(r#"{"a":[1,2,{"b":null}]}"#),
+            Some("[]"),
+            Some("5"),
+            Some("-1.5e3"),
+            Some(r#""x""#),
+            Some("true"),
+            Some("null"),
+            Some("1e999"),
+            Some(" [1, 2] "),
+            Some("\"\u{e9}\u{65e5}\""),
+            None,
+        ];
+        assert!(run(&batch(true, DataType::Utf8, &ok), &["v"]).is_ok());
+    }
+
+    #[test]
+    fn only_a_declared_arrow_json_column_is_read() {
+        let garbage = [Some("abc")];
+        run(&batch(true, DataType::Utf8, &garbage), &[]).unwrap();
+        run(&batch(true, DataType::Utf8, &garbage), &["w"]).unwrap();
+        run(&batch(false, DataType::Utf8, &garbage), &["v"]).unwrap();
+        run(&batch(false, DataType::LargeUtf8, &garbage), &["v"]).unwrap();
+        assert!(run(&batch(true, DataType::Utf8, &garbage), &["v"]).is_err());
     }
 }

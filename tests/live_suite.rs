@@ -182,6 +182,8 @@ mod live_init_extended;
 mod live_int_to_bool_override;
 #[path = "live/live_int_to_float_override.rs"]
 mod live_int_to_float_override;
+#[path = "live/live_json_override_text.rs"]
+mod live_json_override_text;
 #[path = "live/live_keyset.rs"]
 mod live_keyset;
 #[path = "live/live_keyset_composite.rs"]
