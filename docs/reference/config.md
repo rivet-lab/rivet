@@ -317,17 +317,15 @@ Type overrides are applied at export time and are reflected in `rivet check --ty
 
 ---
 
-Some PostgreSQL types have no Arrow representation and cannot be exported directly. Rivet will report an error listing all unmappable columns before the run starts.
+A PostgreSQL type with no Arrow representation is not refused: rivet reads it as the server's own text (`col::text`) and delivers a `Utf8` column. The geometric types, `tsvector`, `tsquery`, `inet`, `cidr`, `macaddr`, `money` and the range types are covered by live cells that compare the delivered text with the server's. Extension types (PostGIS `geometry` and `geography`, `hstore`) take the same path, which an offline test pins; no live cell reads them, because the test stand has no PostGIS. For a PostGIS column that text is the extension's own output (hex-encoded EWKB). To receive another form, select it in a `query`:
 
-| PostgreSQL type | Reason | Workaround |
+| PostgreSQL type | Delivered without a `query` | In a `query`, for another form |
 |---|---|---|
-| `geometry` (PostGIS) | No Arrow equivalent | Cast to text: `ST_AsText(col) AS col` in your query |
-| `geography` (PostGIS) | No Arrow equivalent | Cast to text: `ST_AsText(col) AS col` |
-| `hstore` | No Arrow equivalent | Cast to JSON text: `hstore_to_json(col)::text AS col` |
-| `tsvector`, `tsquery` | No Arrow equivalent | Cast to text: `col::text AS col` |
-| `point`, `line`, `polygon`, etc. | No Arrow equivalent | Cast to text: `col::text AS col` |
+| `geometry`, `geography` (PostGIS) | the server's text (EWKB hex) | `ST_AsText(col) AS col` for WKT, `ST_AsBinary(col) AS col` for WKB |
+| `hstore` | the server's text | `hstore_to_json(col)::text AS col` for JSON text |
+| `tsvector`, `tsquery`, `point`, `line`, `polygon`, etc. | the server's text | `col::text AS col` is what rivet already does |
 
-Use a SQL expression in your `query` field to work around any unsupported type:
+Example, WKT for a PostGIS column:
 
 ```yaml
 exports:

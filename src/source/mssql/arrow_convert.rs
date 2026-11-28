@@ -475,6 +475,18 @@ fn first_timestamp_scale(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
+/// The nanosecond refusal wording of the cell: a `datetimeoffset` loses its offset on a CDC stream, any other date-time does not.
+fn nanos_source(row: &Row, idx: usize) -> NanosSource {
+    match cell(row, idx) {
+        Some(ColumnData::DateTimeOffset(_)) => seeded!(
+            "mssql-offset-nanos-refusal-advises-text",
+            NanosSource::Mssql,
+            NanosSource::MssqlOffset
+        ),
+        _ => NanosSource::Mssql,
+    }
+}
+
 /// The UTC instant of a `datetime2` / `datetimeoffset` cell, or a coded mismatch when the cell is neither.
 fn utc_instant(
     row: &Row,
@@ -812,7 +824,11 @@ fn build_array(
                     Some(dt) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
-                        Some(timestamp_nanos_or_refuse(dt, NanosSource::Mssql, column)?)
+                        Some(timestamp_nanos_or_refuse(
+                            dt,
+                            nanos_source(row, idx),
+                            column
+                        )?)
                     ) {
                         Some(ns) => b.append_value(ns),
                         None => b.append_null(),
@@ -2198,6 +2214,42 @@ mod error_code_tests {
                 }
             }
         }
+    }
+
+    /// A nanosecond refusal over a `datetimeoffset` does not advise `text` for a stream-only CDC export; over a `datetime2` it keeps that advice.
+    #[test]
+    fn the_nanosecond_refusal_advises_text_for_a_stream_only_export_only_over_a_datetime2() {
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = DateTime2::new(Date::new(839_692), Time::new(1, 7));
+        let ts = |tz: Option<&str>| DataType::Timestamp(TimeUnit::Nanosecond, tz.map(Into::into));
+        let refusal = |ty: ColumnType, data: ColumnData<'static>, tz: Option<&str>| {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", ts(tz), true)]));
+            let rows = [Row::builder().column("v", ty, data).build()];
+            let err = mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new())
+                .unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            format!("{err:#}")
+        };
+        let plain = refusal(
+            ColumnType::Datetime2,
+            ColumnData::DateTime2(Some(dt2)),
+            None,
+        );
+        assert!(
+            plain.contains("`text` is for a batch export and a stream-only CDC export (SQL Server refuses it on a CDC baseline)"),
+            "{plain}"
+        );
+        let offset = refusal(
+            ColumnType::DatetimeOffsetn,
+            ColumnData::DateTimeOffset(Some(DateTimeOffset::new(dt2, 120))),
+            Some("UTC"),
+        );
+        assert!(
+            offset.ends_with(
+                "`text` is for a batch export only: a CDC baseline refuses it, and a stream-only CDC export delivers a datetimeoffset as UTC text without its offset; a `mode: cdc` export declares `timestamp_tz`."
+            ) && !offset.contains("batch export and a stream-only CDC export"),
+            "{offset}"
+        );
     }
 
     /// A native column (no `columns:` override) whose cell the builder cannot read is an internal stop, never a blame on the operator.

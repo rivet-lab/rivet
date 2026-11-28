@@ -113,8 +113,12 @@ stops the query at the budget.
 | `RAW`, `LONG RAW`, `BLOB` | Binary |
 | `JSON`, `XMLTYPE`, `VECTOR`, `ROWID` | text, serialized on the server |
 
-Refused with the column named (live-tested on a VARRAY): user-defined object
-types, collections and `ANYDATA` — select their attributes in a `query:`. An
+Refused with the column named (live-tested on a VARRAY and an object type): user-defined object
+types, collections and `ANYDATA`. In a `query:`, select an object type's scalar attributes
+(`t.col.attr`), select a collection's elements through `TABLE(t.col)`, or leave the column out;
+the refusal text names these forms and a live cell runs each. For `SDO_GEOMETRY`, Oracle
+documents `SDO_UTIL.TO_WKBGEOMETRY(t.col)` (a BLOB) and `SDO_UTIL.TO_WKTGEOMETRY(t.col)` (a
+CLOB); no live cell runs them, because the test stand's Oracle image has no Spatial. An
 unaliased `ROWID` in a `query:` is refused too — alias it.
 
 BC dates keep their calendar fields (Oracle `-0001-06-15` is `0001-06-15 BC` in

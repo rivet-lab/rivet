@@ -1873,7 +1873,7 @@ seeds:
     switch: mysql-spatial-srid-dropped
     engines:
       postgres:
-        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+        na: "a PostgreSQL geometry is the server's text and PostGIS has no rivet mapping; the MySQL spatial mapping does not run"
       mysql:
         cells:
           - a_spatial_value_with_an_srid_is_refused_by_code_with_its_remedies
@@ -1893,7 +1893,7 @@ seeds:
     switch: mysql-spatial-ceiling-on-hex
     engines:
       postgres:
-        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+        na: "a PostgreSQL geometry is the server's text and PostGIS has no rivet mapping; the MySQL spatial mapping does not run"
       mysql:
         cells:
           - a_spatial_value_is_held_to_the_value_ceiling_on_its_bytes_like_a_binary_column
@@ -1930,7 +1930,7 @@ seeds:
     switch: mysql-spatial-srid-prefix-kept
     engines:
       postgres:
-        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+        na: "a PostgreSQL geometry is the server's text and PostGIS has no rivet mapping; the MySQL spatial mapping does not run"
       mysql:
         cells:
           - a_batch_parquet_export_delivers_every_spatial_type_as_the_servers_wkb_hex
@@ -1951,7 +1951,7 @@ seeds:
     switch: cdc-mysql-spatial-cell-unconverted
     engines:
       postgres:
-        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+        na: "a PostgreSQL geometry is the server's text and PostGIS has no rivet mapping; the MySQL spatial mapping does not run"
       mysql:
         cells:
           - a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_and_binlog
@@ -5856,6 +5856,38 @@ seeds:
         na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: mssql-offset-nanos-refusal-advises-text
+    class: "the SQL Server nanosecond refusal over a `datetimeoffset` advises `text` for a stream-only CDC export, which delivers the value shifted to UTC with its offset dropped and the fraction widened"
+    history: "2026-11-28: the refusal text of the `datetime2` column was reused for `datetimeoffset`; the change stream drops the offset (2300-01-01 00:00:00.0000001 +02:00 arrives as 2299-12-31 22:00:00.000000100)"
+    scope: source
+    engines:
+      mssql:
+        switch: mssql-offset-nanos-refusal-advises-text
+        cells: [a_datetimeoffset_past_the_nanosecond_range_is_not_advised_text_for_a_stream_only_export]
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, so no value reaches the nanosecond refusal"
+      mysql:
+        na: "MySQL has no nanosecond builder and no offset-carrying date-time type"
+      mongo:
+        na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+      oracle:
+        na: "the Oracle nanosecond refusal is worded by NanosSource::Oracle, which names no CDC baseline and no stream-only advice"
+  - name: oracle-object-refusal-names-no-remedy
+    class: "the Oracle refusal of an object or collection column names a remedy rivet does not run, or none, so the operator cannot follow it"
+    history: "2026-11-28: the text said `select their attributes in a query:` and named nothing for a collection or an SDO_GEOMETRY; it now names the forms a live cell runs and the functions Oracle documents"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-object-refusal-names-no-remedy
+        cells: [an_object_or_collection_column_refusal_names_remedies_that_deliver]
+      postgres:
+        na: "a PostgreSQL composite or extension type is delivered as the server's text, not refused with this text"
+      mysql:
+        na: "MySQL has no object or collection column type"
+      mssql:
+        na: "a SQL Server CLR type is delivered as hex, not refused with this text"
+      mongo:
+        na: "a document source has no declared object column type"
   - name: mssql-text-over-datetime-refused
     class: "a SQL Server `datetime2`, `datetimeoffset`, `datetime` or `smalldatetime` column declared `text` under `columns:` is refused with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, so a value past 1677..2262 that the refusal says to deliver as text has no remedy"
     history: "ADR-0038 CP1, owner rule 2026-11-24: a value the native type cannot hold is delivered as its server text; the SQL Server override table read no text for a temporal"

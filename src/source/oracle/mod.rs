@@ -245,6 +245,25 @@ fn unique_alias(base: &str, names: &[&str]) -> String {
     alias
 }
 
+/// The refusal of object or collection columns, naming each by name and the `query:` forms that read them.
+fn object_columns_refused(objects: &[&str]) -> anyhow::Error {
+    let remedy = seeded!(
+        "oracle-object-refusal-names-no-remedy",
+        "; select their attributes in a `query:`, or leave them out",
+        ". In a `query:`, select an object type's scalar attributes (`t.col.attr`), select a \
+         collection's elements through `TABLE(t.col)`, or leave the column out. For an \
+         SDO_GEOMETRY column, Oracle documents SDO_UTIL.TO_WKBGEOMETRY(t.col), which returns a \
+         BLOB, and SDO_UTIL.TO_WKTGEOMETRY(t.col), which returns a CLOB."
+    );
+    crate::error::coded(
+        crate::error::codes::TYPE_UNSAFE_MAPPING,
+        format!(
+            "oracle: column(s) {objects:?} are object or collection types rivet cannot export \
+             (only XMLTYPE is re-read, as text){remedy}"
+        ),
+    )
+}
+
 /// A result column name an outer query cannot reference.
 fn alias_required(name: &str) -> anyhow::Error {
     crate::error::coded(
@@ -455,12 +474,7 @@ impl OracleSource {
             && let Err(e) = self.describe(&sql)
         {
             if format!("{e:#}").contains("ORA-00932") {
-                crate::rivet_bail!(
-                    crate::error::codes::TYPE_UNSAFE_MAPPING,
-                    "oracle: column(s) {objects:?} are object or collection types rivet cannot \
-                 export (only XMLTYPE is re-read, as text); select their attributes in a \
-                 `query:`, or leave them out"
-                )
+                return Err(object_columns_refused(&objects));
             }
             return Err(e);
         }
@@ -1307,6 +1321,17 @@ mod tests {
 mod error_code_tests {
     use super::*;
     use crate::config::{TlsConfig, TlsMode};
+
+    /// The object-column refusal names the column, the three `query:` forms that read it, and the documented SDO_UTIL functions.
+    #[test]
+    fn the_object_column_refusal_names_the_query_forms_that_read_it() {
+        let err = object_columns_refused(&["O", "VA"]);
+        crate::error::assert_coded(&err, "RIVET_TYPE_UNSAFE_MAPPING", 1);
+        assert_eq!(
+            format!("{err:#}"),
+            "oracle: column(s) [\"O\", \"VA\"] are object or collection types rivet cannot export (only XMLTYPE is re-read, as text). In a `query:`, select an object type's scalar attributes (`t.col.attr`), select a collection's elements through `TABLE(t.col)`, or leave the column out. For an SDO_GEOMETRY column, Oracle documents SDO_UTIL.TO_WKBGEOMETRY(t.col), which returns a BLOB, and SDO_UTIL.TO_WKTGEOMETRY(t.col), which returns a CLOB."
+        );
+    }
 
     /// A statement failure whose server number is typed permanent exits 1 whatever transient word the identifier it quotes holds.
     #[test]
