@@ -464,6 +464,29 @@ mod tests {
     }
 
     #[test]
+    fn sql_server_refuses_text_over_a_time_or_a_date_with_the_wire_code() {
+        let time = RivetType::Time {
+            unit: TimeUnit::Microsecond,
+        };
+        for (native, src) in [("time", time), ("date", RivetType::Date)] {
+            for tgt in [RivetType::String, RivetType::Text] {
+                assert!(
+                    !override_is_read(Engine::Mssql, native, &src, &tgt),
+                    "{native} {tgt:?}"
+                );
+                let err =
+                    resolve_column(Engine::Mssql, &one("t", tgt), "t", native, || src.clone())
+                        .unwrap_err();
+                assert_eq!(
+                    crate::error::code_of(&err).map(|c| c.id),
+                    Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id),
+                    "{native}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_declared_text_over_a_sql_server_date_time_is_found_and_nothing_else() {
         let col = |name: &str, ty: RivetType| {
             crate::types::TypeMapping::from_source(
