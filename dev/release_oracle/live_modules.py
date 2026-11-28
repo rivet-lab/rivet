@@ -294,8 +294,8 @@ def slice_budget_problems(plans: list[dict[str, list[str]]], ceiling: float = SL
     return out
 
 
-def plan_matrix(slices: int) -> str:
-    """The gate-hosted matrix JSON for `slices` live slices plus slice 0, or a SystemExit naming every slice over the ceiling."""
+def plan_matrix(slices: int, stage_slices: int = 1) -> str:
+    """The gate-hosted matrix JSON for `slices` live slices plus `stage_slices` stage slices (slice 0, then past the live ones), or a SystemExit naming every slice over the ceiling."""
     import json
 
     plans = hosted_slice_plans(slices)
@@ -306,7 +306,7 @@ def plan_matrix(slices: int) -> str:
         print(f"live slice {i}/{slices}: {tests} tests, {len(plan)} modules ({unmeasured} unmeasured), ~{module_minutes.slice_minutes(costs, plan_cost(plan, costs)):.0f} min", file=sys.stderr)
     if bad := slice_budget_problems(plans):
         raise SystemExit("\n".join(bad))
-    return json.dumps({"slice": list(range(slices + 1))})
+    return json.dumps({"slice": list(range(slices + stage_slices))})
 
 
 def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> None:
@@ -486,7 +486,7 @@ def self_test() -> None:
         RAN_LIVE_MODULES.clear()
         RAN_LIVE_MODULES.update(saved_modules)
     _slices_by_minutes_self_test()
-    declared = int(re.search(r'^  LIVE_SLICES: "(\d+)"', (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text(), re.M)[1])
+    declared = int(re.search(r'^  LIVE_SLICES: "(\d+)(?::\d+)?"', (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text(), re.M)[1])
     module_minutes.self_test()
     assert declared >= 1 and not slice_budget_problems(hosted_slice_plans(declared)), f"gate-hosted.yml runs {declared} live slices and the planner refuses them: {slice_budget_problems(hosted_slice_plans(declared))}"
     print("self-test ok: --engines runs the named engines' live modules and the engine-less ones, prints the rest as excluded, and no selector runs all")
@@ -494,6 +494,7 @@ def self_test() -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "plan":
-        print(plan_matrix(int(sys.argv[2])))
+        n, _, k = sys.argv[2].partition(":")
+        print(plan_matrix(int(n), int(k or 1)))
     else:
-        raise SystemExit("usage: python3 -m dev.release_oracle.live_modules plan N")
+        raise SystemExit("usage: python3 -m dev.release_oracle.live_modules plan N[:K]")
