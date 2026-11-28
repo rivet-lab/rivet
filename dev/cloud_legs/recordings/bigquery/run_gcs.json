@@ -4,11 +4,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2F_SUCCESS",
-   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object: rivet_data_test/pm_cl_1795212521/_SUCCESS\",\n    \"errors\": [\n      {\n        \"message\": \"No such object: rivet_data_test/pm_cl_1795212521/_SUCCESS\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2F_SUCCESS",
+   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object: rivet_data_test/pm_cl_1795362957/_SUCCESS\",\n    \"errors\": [\n      {\n        \"message\": \"No such object: rivet_data_test/pm_cl_1795362957/_SUCCESS\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg2_stn4PAkW8YZE_bJystCo259AWC2XH-I4KaXk953TZ3Hudc6UeBYwCpthue5Fk_n1"
+    "x-guploader-uploadid": "AFy3sg0usg-pPRwkfnbTBn9VP6PQz6eQiqQG51JO41fPvRKqS-SUV5_LfEVxNaug7JY-GlIzAwKG0VQ"
    },
    "request_headers": {},
    "status": 404
@@ -17,11 +17,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795212521/&delimiter=/&maxResults=1",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795362957/&delimiter=/&maxResults=1",
    "reply": "{\n  \"kind\": \"storage#objects\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg0b0IVahisfVQsd0K2KGQ3BO8njmjxm7HbT4APniAwTLJPMpVdg6S19ZWkDjcxp3NPPSkePL8U"
+    "x-guploader-uploadid": "AFy3sg23HfMuEHrjLfKE8JV7e3H0o0MEmL41-u6KcPPvyraOS26LuwQErnlPrdhmu1cj_9XK"
    },
    "request_headers": {},
    "status": 200
@@ -30,11 +30,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json",
-   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object: rivet_data_test/pm_cl_1795212521/manifest.json\",\n    \"errors\": [\n      {\n        \"message\": \"No such object: rivet_data_test/pm_cl_1795212521/manifest.json\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json",
+   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"No such object: rivet_data_test/pm_cl_1795362957/manifest.json\",\n    \"errors\": [\n      {\n        \"message\": \"No such object: rivet_data_test/pm_cl_1795362957/manifest.json\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ]\n  }\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg0qtw6NQwZHH6ysHOY6Fc1sjiFx-3A9HsosancTnf1-82_T69W39ZSD2ZlhK9jh2wgbheeeD00"
+    "x-guploader-uploadid": "AFy3sg1C4d0ziZ3_BbtNMqoAqr_V5uwV3-FgdAXY2otEi9WwFQU586DUxNPGrrd6aShEpYtB"
    },
    "request_headers": {},
    "status": 404
@@ -43,11 +43,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json?alt=media",
-   "reply": "No such object: rivet_data_test/pm_cl_1795212521/manifest.json",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json?alt=media",
+   "reply": "No such object: rivet_data_test/pm_cl_1795362957/manifest.json",
    "reply_headers": {
     "content-type": "text/html; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg0MPnQIwzPKxjN8JcJTIggSHu76fAkkde2F0yGalO-HGP1a2K6Fwa9li6Cn90V_vuZkw1pimm8"
+    "x-guploader-uploadid": "AFy3sg3mzyXR6kdL9L6ANDttvFyA-ZENTferPLoYIsRwz6wvbvUf9eFGQAWvCtGBz7Yy0ndu"
    },
    "request_headers": {},
    "status": 404
@@ -56,25 +56,25 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795212521/&delimiter=/&maxResults=1",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795362957/&delimiter=/&maxResults=1",
    "reply": "{\n  \"kind\": \"storage#objects\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg2kz5S--BdNqpf319eZAv7eMelEi4Si_GV8mDtuJmK2VZWaqSZV_rhFsQmGMIQ_7Vsd418zQMg"
+    "x-guploader-uploadid": "AFy3sg32mUroOhitHibUHAEyv56mD65JP7EmOQOImYFLhwdqnG_uJKnm3N8SMtDPzCWRjf4d"
    },
    "request_headers": {},
    "status": 200
   },
   {
    "binary": false,
-   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795212521_20261120T220844.608_19119\",\n  \"export_name\": \"pm_cl_1795212521\",\n  \"export_family\": \"pm_cl_1795212521\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-20T22:08:44.609758+00:00\",\n  \"finished_at\": \"\",\n  \"status\": \"running\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795212521/\"\n  },\n  \"format\": \"\",\n  \"compression\": \"\",\n  \"schema_fingerprint\": \"\",\n  \"row_count\": 0,\n  \"part_count\": 0,\n  \"parts\": []\n}",
+   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795362957_20261122T155601.654_43382\",\n  \"export_name\": \"pm_cl_1795362957\",\n  \"export_family\": \"pm_cl_1795362957\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-22T15:56:01.654408+00:00\",\n  \"finished_at\": \"\",\n  \"status\": \"running\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795362957/\"\n  },\n  \"format\": \"\",\n  \"compression\": \"\",\n  \"schema_fingerprint\": \"\",\n  \"row_count\": 0,\n  \"part_count\": 0,\n  \"parts\": []\n}",
    "method": "POST",
-   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json",
-   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json/1795212525462126\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json?generation=1795212525462126&alt=media\",\n  \"name\": \"pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795212525462126\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"571\",\n  \"md5Hash\": \"cLQzMMxioUo3e4l/2UUpyA==\",\n  \"crc32c\": \"pscoTw==\",\n  \"etag\": \"CO7EgefHl5gDEAE=\",\n  \"timeCreated\": \"2026-11-20T22:08:45.520Z\",\n  \"updated\": \"2026-11-20T22:08:45.520Z\",\n  \"timeStorageClassUpdated\": \"2026-11-20T22:08:45.520Z\",\n  \"timeFinalized\": \"2026-11-20T22:08:45.520Z\"\n}\n",
+   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json/1795362962347357\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json?generation=1795362962347357&alt=media\",\n  \"name\": \"pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795362962347357\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"571\",\n  \"md5Hash\": \"rfrQ7WV4EkyRLWYw4awwIQ==\",\n  \"crc32c\": \"/aZCsQ==\",\n  \"etag\": \"CN2q9Jz4m5gDEAE=\",\n  \"timeCreated\": \"2026-11-22T15:56:02.408Z\",\n  \"updated\": \"2026-11-22T15:56:02.408Z\",\n  \"timeStorageClassUpdated\": \"2026-11-22T15:56:02.408Z\",\n  \"timeFinalized\": \"2026-11-22T15:56:02.408Z\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "etag": "CO7EgefHl5gDEAE=",
-    "x-guploader-uploadid": "AFy3sg3AHcw1NDoygebrVKgD7wb_ZEIg7MZcPfP8v0sOlr9LJn7UpuZqCOOceAdonOLcWBbX"
+    "etag": "CN2q9Jz4m5gDEAE=",
+    "x-guploader-uploadid": "AFy3sg0EGlhYDnNSOTR8wEKE8RToo9yfnDDOUYW_JR20k0jup6lYWhSdGivgc96EoijuNXzPVIEUIGY"
    },
    "request_headers": {},
    "status": 200
@@ -83,11 +83,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json?alt=media",
-   "reply": "No such object: rivet_data_test/pm_cl_1795212521/manifest.json",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json?alt=media",
+   "reply": "No such object: rivet_data_test/pm_cl_1795362957/manifest.json",
    "reply_headers": {
     "content-type": "text/html; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg3FyoKrd2ktw8h24W77qb-u2QIaa8XzbVydO1b5W6nu1kuB8zabcFPZ2WqfdgzBcdEaonmuAu0"
+    "x-guploader-uploadid": "AFy3sg0HH8hfDoFDDuu-3EiXcBbUt5WqceAyMGhcev_IaxHNkj2jrvS1JEMjzsvKMs9H-o1A"
    },
    "request_headers": {},
    "status": 404
@@ -96,11 +96,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795212521/&delimiter=/&maxResults=1",
-   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json/1795212525462126\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json?generation=1795212525462126&alt=media\",\n      \"name\": \"pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795212525462126\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"cLQzMMxioUo3e4l/2UUpyA==\",\n      \"crc32c\": \"pscoTw==\",\n      \"etag\": \"CO7EgefHl5gDEAE=\",\n      \"timeCreated\": \"2026-11-20T22:08:45.520Z\",\n      \"updated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeStorageClassUpdated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeFinalized\": \"2026-11-20T22:08:45.520Z\"\n    }\n  ]\n}\n",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795362957/&delimiter=/&maxResults=1",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json/1795362962347357\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json?generation=1795362962347357&alt=media\",\n      \"name\": \"pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795362962347357\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"rfrQ7WV4EkyRLWYw4awwIQ==\",\n      \"crc32c\": \"/aZCsQ==\",\n      \"etag\": \"CN2q9Jz4m5gDEAE=\",\n      \"timeCreated\": \"2026-11-22T15:56:02.408Z\",\n      \"updated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeStorageClassUpdated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeFinalized\": \"2026-11-22T15:56:02.408Z\"\n    }\n  ]\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg3K0kvUqcLiagicsHESJ77S9y56jcGvEMN3uBeAm1llk8Q7aV-ZxQHwMsBRx15LRVqrUvlAvLw"
+    "x-guploader-uploadid": "AFy3sg1peGoy8Lzc_JxEI4gcUl7E8MA5IIDmOVoPHYH0BRnxDOHp5U4HYZfxJ1soghjt6lBO"
    },
    "request_headers": {},
    "status": 200
@@ -109,11 +109,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json?alt=media",
-   "reply": "No such object: rivet_data_test/pm_cl_1795212521/manifest.json",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json?alt=media",
+   "reply": "No such object: rivet_data_test/pm_cl_1795362957/manifest.json",
    "reply_headers": {
     "content-type": "text/html; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg224f5SYhCUk2Jj33boDJMO3XK1AtLS34WAasQZe3M5b-zUYHye5rDUsnrcLsHTdjsA"
+    "x-guploader-uploadid": "AFy3sg2gH3WS1hDzuqjcYmfguRB0QLS72pNjvzHn2-4--hPKIsWyyWJPoskfQzHeN_OICKKA"
    },
    "request_headers": {},
    "status": 404
@@ -122,11 +122,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795212521/&delimiter=/&maxResults=1",
-   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json/1795212525462126\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json?generation=1795212525462126&alt=media\",\n      \"name\": \"pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795212525462126\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"cLQzMMxioUo3e4l/2UUpyA==\",\n      \"crc32c\": \"pscoTw==\",\n      \"etag\": \"CO7EgefHl5gDEAE=\",\n      \"timeCreated\": \"2026-11-20T22:08:45.520Z\",\n      \"updated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeStorageClassUpdated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeFinalized\": \"2026-11-20T22:08:45.520Z\"\n    }\n  ]\n}\n",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795362957/&delimiter=/&maxResults=1",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json/1795362962347357\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json?generation=1795362962347357&alt=media\",\n      \"name\": \"pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795362962347357\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"rfrQ7WV4EkyRLWYw4awwIQ==\",\n      \"crc32c\": \"/aZCsQ==\",\n      \"etag\": \"CN2q9Jz4m5gDEAE=\",\n      \"timeCreated\": \"2026-11-22T15:56:02.408Z\",\n      \"updated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeStorageClassUpdated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeFinalized\": \"2026-11-22T15:56:02.408Z\"\n    }\n  ]\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg0nRYCeGLtHJrcJ954MktUNSIgkwp3anm18lwzOpgkeGEDsM-J8G43K-l800KnmM1R9N_tjjw8"
+    "x-guploader-uploadid": "AFy3sg0mjBH98qsvGR3rIWpfgFWLt1rLd7GdhrcxQ9Gxu4T0Palkz0aHb841790lv_j0NJ48DjDTtmU"
    },
    "request_headers": {},
    "status": 200
@@ -135,12 +135,12 @@
    "binary": true,
    "body": "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ADw5JgIEAAAW+g0VFhamDBU2ABbGBhYGJggW1AgUAAAZHBgMQVJST1c6c2NoZW1hGJAOLy8vLy8wUUZBQUFRQUFBQUFBQUtBQXdBQ2dBSkFBUUFDZ0FBQUJBQUFBQUFBUVFBQ0FBSUFBQUFCQUFJQUFBQUJBQUFBQWdBQUFCc0JBQUF2QU1BQUJ3REFBQnNBZ0FBMUFFQUFFQUJBQUNjQUFBQUJBQUFBTWI3Ly84b0FBQUFGQUFBQUF3QUFBQUFBQUVJRUFBQUFBQUFBQUQrL1AvL0FBQUFBQUlBQUFCa2RBQUFBZ0FBQURnQUFBQUVBQUFBZVB2Ly93Z0FBQUFRQUFBQUJBQUFBR1JoZEdVQUFBQUFFUUFBQUhKcGRtVjBMbTVoZEdsMlpWOTBlWEJsQUFBQXFQdi8vd2dBQUFBUUFBQUFCUUFBQUdWNFlXTjBBQUFBRGdBQUFISnBkbVYwTG1acFpHVnNhWFI1QUFCYS9QLy9NQUFBQUJRQUFBQU1BQUFBQUFBQkNoZ0FBQUFBQUFBQWt2My8vd0FBQWdBQUFBQUFBQUFBQUFJQUFBQjBjd0FBQWdBQUFEd0FBQUFFQUFBQUZQei8vd2dBQUFBVUFBQUFDUUFBQUhScGJXVnpkR0Z0Y0FBQUFCRUFBQUJ5YVhabGRDNXVZWFJwZG1WZmRIbHdaUUFBQUVqOC8vOElBQUFBRUFBQUFBVUFBQUJsZUdGamRBQUFBQTRBQUFCeWFYWmxkQzVtYVdSbGJHbDBlUUFBK3Z6Ly95UUFBQUFVQUFBQURBQUFBQUFBQVFZTUFBQUFBQUFBQUhELy8vOEJBQUFBWWdBQUFBSUFBQUE0QUFBQUJBQUFBS2o4Ly84SUFBQUFFQUFBQUFRQUFBQmliMjlzQUFBQUFCRUFBQUJ5YVhabGRDNXVZWFJwZG1WZmRIbHdaUUFBQU5qOC8vOElBQUFBRUFBQUFBVUFBQUJsZUdGamRBQUFBQTRBQUFCeWFYWmxkQzVtYVdSbGJHbDBlUUFBaXYzLy95Z0FBQUFZQUFBQURBQUFBQUFBQVFVUUFBQUFBQUFBQUFRQUJBQUVBQUFBQVFBQUFITUFBQUFDQUFBQU9BQUFBQVFBQUFBOC9mLy9DQUFBQUJBQUFBQUVBQUFBZEdWNGRBQUFBQUFSQUFBQWNtbDJaWFF1Ym1GMGFYWmxYM1I1Y0dVQUFBQnMvZi8vQ0FBQUFCQUFBQUFGQUFBQVpYaGhZM1FBQUFBT0FBQUFjbWwyWlhRdVptbGtaV3hwZEhrQUFCNysvLzhzQUFBQUZBQUFBQXdBQUFBQUFBRUhGQUFBQUFBQUFBQzAvZi8vQkFBQUFCSUFBQUFCQUFBQVpBQUFBQUlBQUFBNEFBQUFCQUFBQU5UOS8vOElBQUFBRUFBQUFBY0FBQUJ1ZFcxbGNtbGpBQkVBQUFCeWFYWmxkQzV1WVhScGRtVmZkSGx3WlFBQUFBVCsvLzhJQUFBQUVBQUFBQVVBQUFCbGVHRmpkQUFBQUE0QUFBQnlhWFpsZEM1bWFXUmxiR2wwZVFBQUFBQVNBQm9BRkFBU0FCTUFDQUFBQUF3QUJBQVNBQUFBTUFBQUFCZ0FBQUFjQUFBQUFBQUJBeGdBQUFBQUFBWUFDQUFHQUFZQUFBQUFBQUlBQUFBQUFBRUFBQUJtQUFBQUFnQUFBRGdBQUFBRUFBQUFoUDcvL3dnQUFBQVFBQUFBQmdBQUFHWnNiMkYwT0FBQUVRQUFBSEpwZG1WMExtNWhkR2wyWlY5MGVYQmxBQUFBdFA3Ly93Z0FBQUFRQUFBQUJRQUFBR1Y0WVdOMEFBQUFEZ0FBQUhKcGRtVjBMbVpwWkdWc2FYUjVBQUJtLy8vL0xBQUFBQkFBQUFBWUFBQUFBQUFCQWhRQUFBQlUvLy8vUUFBQUFBQUFBQUVBQUFBQUFRQUFBRzRBQUFBQ0FBQUFPQUFBQUFRQUFBQWMvLy8vQ0FBQUFCQUFBQUFFQUFBQWFXNTBPQUFBQUFBUkFBQUFjbWwyWlhRdWJtRjBhWFpsWDNSNWNHVUFBQUJNLy8vL0NBQUFBQkFBQUFBRkFBQUFaWGhoWTNRQUFBQU9BQUFBY21sMlpYUXVabWxrWld4cGRIa0FBQUFBRWdBWUFCUUFFZ0FUQUFnQUFBQU1BQVFBRWdBQUFEUUFBQUFZQUFBQUlBQUFBQUFBQVFJY0FBQUFDQUFNQUFRQUN3QUlBQUFBSUFBQUFBQUFBQUVBQUFBQUFnQUFBR2xrQUFBQ0FBQUFRQUFBQUFRQUFBRFEvLy8vQ0FBQUFCQUFBQUFFQUFBQWFXNTBOQUFBQUFBUkFBQUFjbWwyWlhRdWJtRjBhWFpsWDNSNWNHVUFBQUFJQUF3QUNBQUVBQWdBQUFBSUFBQUFFQUFBQUFVQUFBQmxlR0ZqZEFBQUFBNEFBQUJ5YVhabGRDNW1hV1JsYkdsMGVRQUEAGAVyaXZldBmMHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAAOYKAABQQVIx",
    "method": "POST",
-   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795212521/pm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet",
-   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795212521/pm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet/1795212527000405\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fpm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fpm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet?generation=1795212527000405&alt=media\",\n  \"name\": \"pm_cl_1795212521/pm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795212527000405\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"3702\",\n  \"md5Hash\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n  \"crc32c\": \"QC4gEQ==\",\n  \"etag\": \"CNW23+fHl5gDEAE=\",\n  \"timeCreated\": \"2026-11-20T22:08:47.064Z\",\n  \"updated\": \"2026-11-20T22:08:47.064Z\",\n  \"timeStorageClassUpdated\": \"2026-11-20T22:08:47.064Z\",\n  \"timeFinalized\": \"2026-11-20T22:08:47.064Z\"\n}\n",
+   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795362957/pm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795362957/pm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet/1795362963999322\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fpm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fpm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet?generation=1795362963999322&alt=media\",\n  \"name\": \"pm_cl_1795362957/pm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795362963999322\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"3702\",\n  \"md5Hash\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n  \"crc32c\": \"QC4gEQ==\",\n  \"etag\": \"CNqU2Z34m5gDEAE=\",\n  \"timeCreated\": \"2026-11-22T15:56:04.058Z\",\n  \"updated\": \"2026-11-22T15:56:04.058Z\",\n  \"timeStorageClassUpdated\": \"2026-11-22T15:56:04.058Z\",\n  \"timeFinalized\": \"2026-11-22T15:56:04.058Z\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "etag": "CNW23+fHl5gDEAE=",
-    "x-guploader-uploadid": "AFy3sg2TqAGbW7PxllpIq2oZcciHdPoSKKXCVL3Sr5JSp9Hnc76iZBnAPBxb3UO9P8tOea9AauQSeHY"
+    "etag": "CNqU2Z34m5gDEAE=",
+    "x-guploader-uploadid": "AFy3sg2o5K823yPEmmJ_x7unNaj-RJYxmJVlnEmEmbP-kkG1rG0Xg0FffefSQAlcyPzbQBdQ"
    },
    "request_headers": {},
    "status": 200
@@ -149,11 +149,11 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json?alt=media",
-   "reply": "No such object: rivet_data_test/pm_cl_1795212521/manifest.json",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json?alt=media",
+   "reply": "No such object: rivet_data_test/pm_cl_1795362957/manifest.json",
    "reply_headers": {
     "content-type": "text/html; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg0m9uS2dFeq9SllxF_7KwGAx82anE4C80c-IX5oRG92QjBeYd-kcxUU7f9sPLafrVdTMLG2ccE"
+    "x-guploader-uploadid": "AFy3sg0cP2FFdi6Wuti6CmG-P2jGxf_Nb5vuY6XSdsGeeX0HpJZPx75oOr76ukA1oN2jCg1Y"
    },
    "request_headers": {},
    "status": 404
@@ -162,53 +162,53 @@
    "binary": false,
    "body": "",
    "method": "GET",
-   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795212521/&delimiter=/&maxResults=1",
-   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"nextPageToken\": \"CklwbV9jbF8xNzk1MjEyNTIxL21hbmlmZXN0LXBtX2NsXzE3OTUyMTI1MjFfMjAyNjExMjBUMjIwODQ0LjYwOF8xOTExOS5qc29u\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json/1795212525462126\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json?generation=1795212525462126&alt=media\",\n      \"name\": \"pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795212525462126\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"cLQzMMxioUo3e4l/2UUpyA==\",\n      \"crc32c\": \"pscoTw==\",\n      \"etag\": \"CO7EgefHl5gDEAE=\",\n      \"timeCreated\": \"2026-11-20T22:08:45.520Z\",\n      \"updated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeStorageClassUpdated\": \"2026-11-20T22:08:45.520Z\",\n      \"timeFinalized\": \"2026-11-20T22:08:45.520Z\"\n    }\n  ]\n}\n",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1795362957/&delimiter=/&maxResults=1",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"nextPageToken\": \"CklwbV9jbF8xNzk1MzYyOTU3L21hbmlmZXN0LXBtX2NsXzE3OTUzNjI5NTdfMjAyNjExMjJUMTU1NjAxLjY1NF80MzM4Mi5qc29u\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json/1795362962347357\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json?generation=1795362962347357&alt=media\",\n      \"name\": \"pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1795362962347357\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"571\",\n      \"md5Hash\": \"rfrQ7WV4EkyRLWYw4awwIQ==\",\n      \"crc32c\": \"/aZCsQ==\",\n      \"etag\": \"CN2q9Jz4m5gDEAE=\",\n      \"timeCreated\": \"2026-11-22T15:56:02.408Z\",\n      \"updated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeStorageClassUpdated\": \"2026-11-22T15:56:02.408Z\",\n      \"timeFinalized\": \"2026-11-22T15:56:02.408Z\"\n    }\n  ]\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "x-guploader-uploadid": "AFy3sg2VNu_rmQBGQ17wsrsWec8MMQnGPFBkg91XrPscTmhbOquHNjKpTr3qIArECigLsGLUs1XEOiY"
+    "x-guploader-uploadid": "AFy3sg2huOVRGHGpTs_OFVgNi1xqH5M5d2CtZElBrI11udDeQVvaNZFJ_iy8qH1XivckyQcf"
    },
    "request_headers": {},
    "status": 200
   },
   {
    "binary": false,
-   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795212521_20261120T220844.608_19119\",\n  \"export_name\": \"pm_cl_1795212521\",\n  \"export_family\": \"pm_cl_1795212521\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-20T22:08:44.608736+00:00\",\n  \"finished_at\": \"2026-11-20T22:08:46.981380+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795212521/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:9ab51724723f6427\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3702,\n      \"content_fingerprint\": \"xxh3:4c51d27a123bc281\",\n      \"content_md5\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"14005618309795257814\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"1687612148975699782\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"12789553711072258215\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"342858774491269097\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"6462880379233927131\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"737834706928766905\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"202032199170061227\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795362957_20261122T155601.654_43382\",\n  \"export_name\": \"pm_cl_1795362957\",\n  \"export_family\": \"pm_cl_1795362957\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-22T15:56:01.654392+00:00\",\n  \"finished_at\": \"2026-11-22T15:56:04.246795+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795362957/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:9ab51724723f6427\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3702,\n      \"content_fingerprint\": \"xxh3:4c51d27a123bc281\",\n      \"content_md5\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"14005618309795257814\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"1687612148975699782\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"12789553711072258215\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"342858774491269097\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"6462880379233927131\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"737834706928766905\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"202032199170061227\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
    "method": "POST",
-   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795212521/manifest.json",
-   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795212521/manifest.json/1795212527807470\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest.json?generation=1795212527807470&alt=media\",\n  \"name\": \"pm_cl_1795212521/manifest.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795212527807470\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1626\",\n  \"md5Hash\": \"g0PKmhYGfW+LBdEWJSnpyg==\",\n  \"crc32c\": \"rarrsA==\",\n  \"etag\": \"CO7XkOjHl5gDEAE=\",\n  \"timeCreated\": \"2026-11-20T22:08:47.865Z\",\n  \"updated\": \"2026-11-20T22:08:47.865Z\",\n  \"timeStorageClassUpdated\": \"2026-11-20T22:08:47.865Z\",\n  \"timeFinalized\": \"2026-11-20T22:08:47.865Z\"\n}\n",
+   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795362957/manifest.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795362957/manifest.json/1795362964941265\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest.json?generation=1795362964941265&alt=media\",\n  \"name\": \"pm_cl_1795362957/manifest.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795362964941265\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1626\",\n  \"md5Hash\": \"Dpt7L5GxXLM7m5vt1zOrVw==\",\n  \"crc32c\": \"y7iuTg==\",\n  \"etag\": \"CNHTkp74m5gDEAE=\",\n  \"timeCreated\": \"2026-11-22T15:56:05.001Z\",\n  \"updated\": \"2026-11-22T15:56:05.001Z\",\n  \"timeStorageClassUpdated\": \"2026-11-22T15:56:05.001Z\",\n  \"timeFinalized\": \"2026-11-22T15:56:05.001Z\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "etag": "CO7XkOjHl5gDEAE=",
-    "x-guploader-uploadid": "AFy3sg31kT2Q0QAeRhrCYTmmKip5HI8NPDG80r0skjQMb0pVzPd4IcFTMNNdF50psTnySDCG"
+    "etag": "CNHTkp74m5gDEAE=",
+    "x-guploader-uploadid": "AFy3sg0LqCX-0vzX7a64b0YIWI40_zLCgO_iuR7E6JKLMDW2v1bjr97Tbzch8uQE0NlXFrtkLWyGC1M"
    },
    "request_headers": {},
    "status": 200
   },
   {
    "binary": false,
-   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795212521_20261120T220844.608_19119\",\n  \"export_name\": \"pm_cl_1795212521\",\n  \"export_family\": \"pm_cl_1795212521\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-20T22:08:44.608736+00:00\",\n  \"finished_at\": \"2026-11-20T22:08:46.981380+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795212521/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:9ab51724723f6427\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1795212521_20261120_220844_608_19119_0c32b9092fa0396f.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3702,\n      \"content_fingerprint\": \"xxh3:4c51d27a123bc281\",\n      \"content_md5\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"14005618309795257814\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"1687612148975699782\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"12789553711072258215\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"342858774491269097\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"6462880379233927131\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"737834706928766905\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"202032199170061227\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "body": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1795362957_20261122T155601.654_43382\",\n  \"export_name\": \"pm_cl_1795362957\",\n  \"export_family\": \"pm_cl_1795362957\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-22T15:56:01.654392+00:00\",\n  \"finished_at\": \"2026-11-22T15:56:04.246795+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1795362957/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:9ab51724723f6427\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1795362957_20261122_155601_654_43382_b21f657efcfec62a.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3702,\n      \"content_fingerprint\": \"xxh3:4c51d27a123bc281\",\n      \"content_md5\": \"cWtXsS8e+yqATH89RyLgEQ==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"14005618309795257814\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"1687612148975699782\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"12789553711072258215\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"342858774491269097\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"6462880379233927131\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"737834706928766905\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"202032199170061227\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
    "method": "POST",
-   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json",
-   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json/1795212528129973\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2Fmanifest-pm_cl_1795212521_20261120T220844.608_19119.json?generation=1795212528129973&alt=media\",\n  \"name\": \"pm_cl_1795212521/manifest-pm_cl_1795212521_20261120T220844.608_19119.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795212528129973\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1626\",\n  \"md5Hash\": \"g0PKmhYGfW+LBdEWJSnpyg==\",\n  \"crc32c\": \"rarrsA==\",\n  \"etag\": \"CLWvpOjHl5gDEAE=\",\n  \"timeCreated\": \"2026-11-20T22:08:48.245Z\",\n  \"updated\": \"2026-11-20T22:08:48.245Z\",\n  \"timeStorageClassUpdated\": \"2026-11-20T22:08:48.245Z\",\n  \"timeFinalized\": \"2026-11-20T22:08:48.245Z\"\n}\n",
+   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json/1795362965263281\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2Fmanifest-pm_cl_1795362957_20261122T155601.654_43382.json?generation=1795362965263281&alt=media\",\n  \"name\": \"pm_cl_1795362957/manifest-pm_cl_1795362957_20261122T155601.654_43382.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795362965263281\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1626\",\n  \"md5Hash\": \"Dpt7L5GxXLM7m5vt1zOrVw==\",\n  \"crc32c\": \"y7iuTg==\",\n  \"etag\": \"CLGnpp74m5gDEAE=\",\n  \"timeCreated\": \"2026-11-22T15:56:05.397Z\",\n  \"updated\": \"2026-11-22T15:56:05.397Z\",\n  \"timeStorageClassUpdated\": \"2026-11-22T15:56:05.397Z\",\n  \"timeFinalized\": \"2026-11-22T15:56:05.397Z\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "etag": "CLWvpOjHl5gDEAE=",
-    "x-guploader-uploadid": "AFy3sg0ZpPlNd2itRQUjXaSpYmR3P1sl0bL2vIi8APaTD48-mfOwNmwWeoLTnt1Dir7S08HiN3iF5Kg"
+    "etag": "CLGnpp74m5gDEAE=",
+    "x-guploader-uploadid": "AFy3sg0PpJn1zvmD9ZeQVe-S4JWcGkk59aTl2MOR-Nzj-jn-_-7lvWDz4n1zs5aMKS4iAAUK"
    },
    "request_headers": {},
    "status": 200
   },
   {
    "binary": false,
-   "body": "xxh3:f4adba9990468f7b\n",
+   "body": "xxh3:3dcedbf983d7d38e\n",
    "method": "POST",
-   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795212521/_SUCCESS",
-   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795212521/_SUCCESS/1795212528496676\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2F_SUCCESS\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795212521%2F_SUCCESS?generation=1795212528496676&alt=media\",\n  \"name\": \"pm_cl_1795212521/_SUCCESS\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795212528496676\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"22\",\n  \"md5Hash\": \"HvVsj/4O2M3HdDRYrtYj3g==\",\n  \"crc32c\": \"2ArxSg==\",\n  \"etag\": \"CKTguujHl5gDEAE=\",\n  \"timeCreated\": \"2026-11-20T22:08:48.555Z\",\n  \"updated\": \"2026-11-20T22:08:48.555Z\",\n  \"timeStorageClassUpdated\": \"2026-11-20T22:08:48.555Z\",\n  \"timeFinalized\": \"2026-11-20T22:08:48.555Z\"\n}\n",
+   "path": "/upload/storage/v1/b/rivet_data_test/o?uploadType=media&name=pm_cl_1795362957/_SUCCESS",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1795362957/_SUCCESS/1795362965659341\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2F_SUCCESS\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1795362957%2F_SUCCESS?generation=1795362965659341&alt=media\",\n  \"name\": \"pm_cl_1795362957/_SUCCESS\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1795362965659341\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"22\",\n  \"md5Hash\": \"/B39WXeusZ9CKE2wVu3q/Q==\",\n  \"crc32c\": \"itEqNw==\",\n  \"etag\": \"CM29vp74m5gDEAE=\",\n  \"timeCreated\": \"2026-11-22T15:56:05.720Z\",\n  \"updated\": \"2026-11-22T15:56:05.720Z\",\n  \"timeStorageClassUpdated\": \"2026-11-22T15:56:05.720Z\",\n  \"timeFinalized\": \"2026-11-22T15:56:05.720Z\"\n}\n",
    "reply_headers": {
     "content-type": "application/json; charset=UTF-8",
-    "etag": "CKTguujHl5gDEAE=",
-    "x-guploader-uploadid": "AFy3sg2_vau1Xz-gmEjGXYakRQmpjUV6seLNEhsCh6GPlvEzsinfewjADGTQ6LFAGCyDFIaSp3KUB0g"
+    "etag": "CM29vp74m5gDEAE=",
+    "x-guploader-uploadid": "AFy3sg1qUWO9UGqPhMBXCYwZ4YsbCLR-Si6HHmsBDHu-aHUbPPkjdhI-iwj0sbaNHkbaDR_w"
    },
    "request_headers": {},
    "status": 200

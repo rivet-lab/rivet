@@ -58,6 +58,11 @@ impl SfLive {
 
     /// The top-level `load:` line for a rig, with `extra` appended inside the mapping.
     pub fn load_line(&self, extra: &str) -> String {
+        self.load_line_in(&self.database, &self.schema, extra)
+    }
+
+    /// [`SfLive::load_line`] naming `database` and `schema` in place of the stand's.
+    pub fn load_line_in(&self, database: &str, schema: &str, extra: &str) -> String {
         let role = self
             .role
             .as_ref()
@@ -69,10 +74,15 @@ impl SfLive {
             self.user,
             self.private_key_path,
             self.warehouse,
-            self.database,
-            self.schema,
+            database,
+            schema,
             self.integration
         )
+    }
+
+    /// The stand's database and schema, which exist.
+    pub fn place(&self) -> (&str, &str) {
+        (&self.database, &self.schema)
     }
 
     /// Every row of `sql`, read through the DuckDB reader (a second client, never rivet's own transport).

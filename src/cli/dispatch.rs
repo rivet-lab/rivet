@@ -483,10 +483,9 @@ fn dispatch_check(
         tgt,
         &planned_strategies(&plans),
     )?;
-    let declared = crate::config::declared_exports(
-        &Config::load_with_params(&config, p.as_ref())?,
-        export.as_deref(),
-    )?;
+    let cfg = Config::load_with_params(&config, p.as_ref())?;
+    let declared = crate::config::declared_exports(&cfg, export.as_deref())?;
+    crate::load::probe_load_target(&cfg, &declared)?;
     if let Some(note) =
         crate::error::values_unread_note(crate::config::any_declares_columns(&declared))
     {

@@ -762,6 +762,21 @@ mod tests {
     const FINGERPRINT: &str = "SHA256:d2NBmwH552sXWCQPWGmKNzUj0TZo2HKZ0AMrBo4LxO4=";
     const T0: u64 = 1_700_000_000;
 
+    /// The refusal `check` raises for a missing place carries the code a load's compile error (HTTP 422) stops with.
+    #[test]
+    fn check_refuses_a_missing_place_with_the_code_a_statement_error_gets() {
+        let body = r#"{"code":"002003","sqlState":"42S02","message":"Database 'D' does not exist or not authorized."}"#;
+        let load = error_code(&statement_error(422, body));
+        for found in [
+            crate::load::snowflake::Place::NoDatabase,
+            crate::load::snowflake::Place::NoSchema,
+        ] {
+            let missing = crate::load::missing_snowflake_place(found, "d", "s").unwrap();
+            assert_eq!(Some(missing.code.id), load);
+        }
+        assert_eq!(load, Some("RIVET_LOAD_WAREHOUSE_REJECTED"));
+    }
+
     fn result(row_type: Value, data: Value, partitions: usize) -> String {
         json!({
             "resultSetMetaData": {

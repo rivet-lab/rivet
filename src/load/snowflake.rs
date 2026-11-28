@@ -151,6 +151,62 @@ impl SnowflakeLoader {
     }
 }
 
+/// Whether a database and schema are shown to a login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Place {
+    Held,
+    NoDatabase,
+    NoSchema,
+}
+
+impl SnowflakeLoader {
+    /// Whether `SHOW` lists `database`, then `schema` in it, to this login; both folded to upper case as an unquoted name is.
+    pub(crate) fn place(&self, database: &str, schema: &str) -> Result<Place> {
+        let (database, schema) = (database.to_uppercase(), schema.to_uppercase());
+        if !self.shows(
+            &format!("SHOW DATABASES LIKE {}", literal(&database)),
+            &database,
+        )? {
+            return Ok(Place::NoDatabase);
+        }
+        let quoted = format!("\"{}\"", database.replace('"', "\"\""));
+        let show = format!(
+            "SHOW SCHEMAS LIKE {} IN DATABASE {quoted}",
+            literal(&schema)
+        );
+        Ok(match self.shows(&show, &schema)? {
+            true => Place::Held,
+            false => Place::NoSchema,
+        })
+    }
+
+    /// Whether one `SHOW` statement lists a row named exactly `name`.
+    fn shows(&self, sql: &str, name: &str) -> Result<bool> {
+        let answer = self.run_sql(sql)?;
+        let rows = answer
+            .get(0)
+            .and_then(serde_json::Value::as_array)
+            .with_context(|| format!("Snowflake answered `{sql}` without a result set"))?;
+        for row in rows {
+            let listed = row
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .with_context(|| {
+                    format!("Snowflake answered `{sql}` with a row that has no name")
+                })?;
+            if listed == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// `text` as a single-quoted SQL string.
+fn literal(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
 impl TargetLoader for SnowflakeLoader {
     /// `db.schema.table`, every part unquoted.
     fn fqtn(&self, table: &str) -> String {
@@ -1451,6 +1507,52 @@ mod tests {
         );
         let stand = Stand::scripted(&[("INFORMATION_SCHEMA.TABLES", 1, "", "denied")]);
         assert!(stand.loader().object_kind("orders").is_err());
+    }
+
+    /// A database and schema are read from `SHOW`, listed by exact upper-cased name, database first.
+    #[test]
+    fn the_place_is_read_from_show_by_exact_name() {
+        let listed = |name: &str| format!(r#"[[{{"name":"{name}"}}]]"#);
+        let both = Stand::scripted(&[
+            ("SHOW DATABASES", 0, &listed("D"), ""),
+            ("SHOW SCHEMAS", 0, &listed("S"), ""),
+        ]);
+        assert_eq!(both.loader().place("d", "s").unwrap(), Place::Held);
+        assert_eq!(
+            both.sent(),
+            vec![
+                "SHOW DATABASES LIKE 'D'".to_string(),
+                "SHOW SCHEMAS LIKE 'S' IN DATABASE \"D\"".to_string()
+            ]
+        );
+        let no_database = Stand::scripted(&[("SHOW DATABASES", 0, "[[]]", "")]);
+        assert_eq!(
+            no_database.loader().place("d", "s").unwrap(),
+            Place::NoDatabase
+        );
+        assert_eq!(no_database.sent().len(), 1);
+        let no_schema = Stand::scripted(&[
+            ("SHOW DATABASES", 0, &listed("D"), ""),
+            ("SHOW SCHEMAS", 0, "[[]]", ""),
+        ]);
+        assert_eq!(no_schema.loader().place("d", "s").unwrap(), Place::NoSchema);
+    }
+
+    /// A name that only matches the `LIKE` pattern through `_` is not the place.
+    #[test]
+    fn a_like_wildcard_match_is_not_the_place() {
+        let stand = Stand::scripted(&[("SHOW DATABASES", 0, r#"[[{"name":"RIVETXDB"}]]"#, "")]);
+        assert_eq!(
+            stand.loader().place("rivet_db", "s").unwrap(),
+            Place::NoDatabase
+        );
+    }
+
+    /// A refusal of `SHOW` is an error to the probe, never a missing place.
+    #[test]
+    fn a_show_the_login_cannot_run_is_an_error_not_a_missing_place() {
+        let stand = Stand::scripted(&[("SHOW DATABASES", 1, "", "denied")]);
+        assert!(stand.loader().place("d", "s").is_err());
     }
 
     /// Whether a change log holds prior changes is asked of the catalog first.

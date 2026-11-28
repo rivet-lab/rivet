@@ -137,14 +137,19 @@ impl BigQueryApi {
             .clone()
     }
 
-    /// `location` of `dataset` from `datasets.get`.
-    fn read_dataset_location(&self, dataset: &str) -> Result<Option<String>> {
+    /// `dataset`'s resource from `datasets.get`, `None` when the project holds no such dataset.
+    pub(crate) fn dataset_metadata(&self, dataset: &str) -> Result<Option<Value>> {
         let url = format!(
             "{}/bigquery/v2/projects/{}/datasets/{dataset}",
             self.endpoint, self.project
         );
+        self.get_json_if_found(&url, "datasets.get")
+    }
+
+    /// `location` of `dataset` from `datasets.get`.
+    fn read_dataset_location(&self, dataset: &str) -> Result<Option<String>> {
         Ok(self
-            .get_json_if_found(&url, "datasets.get")?
+            .dataset_metadata(dataset)?
             .as_ref()
             .and_then(parse_dataset_location))
     }
@@ -2274,6 +2279,8 @@ pub(crate) mod stand {
         pub(crate) authorization: String,
         /// The JSON body, `null` when there was none.
         pub(crate) body: serde_json::Value,
+        /// The body as text, which a ClickHouse statement is.
+        pub(crate) text: String,
     }
 
     pub(crate) struct Stand {
@@ -2383,6 +2390,7 @@ pub(crate) mod stand {
             path: target.split('?').next().unwrap_or("").to_string(),
             authorization,
             body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+            text: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 }

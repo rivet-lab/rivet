@@ -391,6 +391,19 @@ impl LoadTarget {
         }
     }
 
+    /// The place the load writes to, as the warehouse names it.
+    pub(crate) fn place(&self) -> String {
+        match self {
+            LoadTarget::Bigquery { project, dataset } => {
+                format!("BigQuery dataset `{project}:{dataset}`")
+            }
+            LoadTarget::Snowflake {
+                database, schema, ..
+            } => format!("Snowflake schema `{database}.{schema}`"),
+            LoadTarget::Clickhouse { database, .. } => format!("ClickHouse database `{database}`"),
+        }
+    }
+
     /// How far this warehouse takes a base and a buffer.
     pub(crate) fn base_support(&self) -> BaseSupport {
         match self {

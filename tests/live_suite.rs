@@ -134,6 +134,8 @@ mod live_cdc_type_parity;
 mod live_cdc_value_parity;
 #[path = "live/live_chaos.rs"]
 mod live_chaos;
+#[path = "live/live_check_warehouse_target.rs"]
+mod live_check_warehouse_target;
 #[path = "live/live_chunked_recovery.rs"]
 mod live_chunked_recovery;
 #[path = "live/live_cli_flags.rs"]
