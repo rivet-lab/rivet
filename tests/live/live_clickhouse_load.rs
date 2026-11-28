@@ -1312,7 +1312,7 @@ fn a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid() {
         "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID, ua UUID[]); \
          INSERT INTO {tbl} VALUES \
            (1, '{a}', ARRAY['{b}'::uuid, NULL, '{v1}'::uuid]), \
-           (2, NULL, NULL), \
+           (2, NULL, ARRAY[NULL::uuid]), \
            (3, '{zero}', '{{}}'), \
            (4, '{full}', ARRAY['{a}'::uuid])"
     ))
@@ -1328,7 +1328,7 @@ fn a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid() {
     let table = format!("{}.{tbl}", db.0);
     let source: Vec<String> = c
         .query(
-            &format!("SELECT id, coalesce(u::text, ''), coalesce(ua::text, '{{}}') FROM {tbl} ORDER BY id"),
+            &format!("SELECT id, coalesce(u::text, ''), ua::text FROM {tbl} ORDER BY id"),
             &[],
         )
         .expect("read source")
@@ -2116,13 +2116,17 @@ fn a_date_clickhouse_cannot_hold_is_refused_not_clamped() {
     }
 }
 
-const NULL_ARRAY_COLUMNS: [(&str, &str); 6] = [
+const NULL_ARRAY_COLUMNS: [(&str, &str); 7] = [
     ("INT[]", "'{1,2}'"),
     ("TEXT[]", "'{a,b}'"),
     ("DOUBLE PRECISION[]", "'{1.5}'"),
     ("DATE[]", "'{2024-01-01}'"),
     ("TIMESTAMPTZ[]", "'{2024-01-01 00:00:00+00}'"),
     ("BYTEA[]", "ARRAY['\\x0102'::bytea]"),
+    (
+        "UUID[]",
+        "ARRAY['a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid]",
+    ),
 ];
 
 /// Seeds `(id, a <ty>)` with `first` in row 1 and `second` in row 2, and loads it through `query` into ClickHouse.
